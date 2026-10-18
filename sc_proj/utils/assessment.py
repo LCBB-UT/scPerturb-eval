@@ -1,22 +1,28 @@
 import os
+import sys
 import torch
+import random
 import matplotlib.pyplot as plt
 from scipy.stats import ranksums, wilcoxon
 from scipy.stats import spearmanr, pearsonr, linregress
 from scipy.stats import wasserstein_distance_nd
 from scipy.spatial.distance import cdist
-from sklearn.metrics.pairwise import cosine_similarity
 import pandas as pd
 import numpy as np
 from functools import reduce
 # import ot
 import scanpy as sc
 import anndata as ad
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, accuracy_score, roc_auc_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedKFold
+from sklearn.neural_network import MLPClassifier
 from rpy2.robjects import r, pandas2ri, numpy2ri
 from rpy2.robjects.packages import importr
 import rpy2.robjects as ro
@@ -26,9 +32,17 @@ from itertools import combinations
 from statsmodels.stats.multitest import multipletests
 import statsmodels.api as sm
 from scipy.sparse import issparse, csr_matrix
-from utils.common import calculate_cpm
+target_path = os.path.abspath("/home/karimpour/sc_perturb/sc_proj/utils")
+sys.path.append(target_path)
+from common import calculate_cpm
+from helper import TorchMLPClassifier
 
 np.random.seed(42)
+# random.seed(42)
+# torch.manual_seed(42)
+
+# if torch.cuda.is_available():
+#     torch.cuda.manual_seed_all(42)
 
 
 def spearman_corr(pred_adata, true_adata):
@@ -158,8 +172,10 @@ def rigorous_spearman_corr_per_gene(true_adata_list, pred_adata_list, true_s_ada
         temp_model = defaultdict(list)
         for primary in range(len(true_adata_list)):
             n_test = int(test_fraction * true_adata_list[primary].n_obs)
-            test_indices = np.random.choice(true_adata_list[primary].n_obs, size=n_test, replace=False)
-            train_indices = np.setdiff1d(np.arange(true_adata_list[primary].n_obs), test_indices)
+            # test_indices = np.random.choice(true_adata_list[primary].n_obs, size=n_test, replace=False)
+            # train_indices = np.setdiff1d(np.arange(true_adata_list[primary].n_obs), test_indices)
+            train_indices = true_adata_list[primary].obs[f'split_{_}']=='train'
+            test_indices = true_adata_list[primary].obs[f'split_{_}']=='test'
             train_adata = true_adata_list[primary][train_indices].copy()
             test_adata = true_adata_list[primary][test_indices].copy()
 
@@ -198,6 +214,16 @@ def prediction_error(ctrl_df_ratio, pred_dict, true_df_ratio):
         pred_top[model] = pred_dict[model][top_genes]
         l2_distance[model] = np.asarray(np.sqrt(((pred_top[model] - true_top) ** 2).sum(axis=1))).reshape(-1)
     return l2_distance 
+
+def euclidean_distance(X, Y):
+    if issparse(X):
+        X = X.toarray()
+    if issparse(Y):
+        Y = Y.toarray()
+    X_mean = np.asarray(X.mean(axis=0)).ravel()
+    Y_mean = np.asarray(Y.mean(axis=0)).ravel()
+
+    return np.linalg.norm(X_mean - Y_mean)
 
 def mse(pred_adata, true_adata):
     if issparse(pred_adata.X):
@@ -284,6 +310,33 @@ def sinkhorn_mahalanobis(pred_list, true_list, normalization=False):
         distances.append(distance)
 
     return distances
+
+
+def reg_ot_mahalanobis(pred_X, true_X, scaler, pca, reg=0.1):
+
+    if issparse(true_X):
+        true_X = true_X.toarray()
+    if issparse(pred_X):
+        pred_X = pred_X.toarray()
+
+    true_X = scaler.transform(true_X)
+    pred_X = scaler.transform(pred_X)
+
+    true_reduced = pca.transform(true_X)
+    pred_reduced = pca.transform(pred_X)
+
+    # Create weights for the distributions (equal weight per cell)
+    weights_true = np.ones(true_X.shape[0]) / true_X.shape[0]
+    weights_pred = np.ones(pred_X.shape[0]) / pred_X.shape[0]
+
+    # Define the cost matrix (distance between cells)
+    cost_matrix = ot.dist(true_reduced, pred_reduced, metric="mahalanobis")
+
+    # Solve the optimal transport problem
+    distance = ot.sinkhorn2(weights_true, weights_pred, cost_matrix, reg=reg)
+
+    return distance
+
 
 def corr_top_k(modality_adata, pred_mean, primary_variable, ood_primary):
 
@@ -730,7 +783,7 @@ def seurat_deg(adata, grouping_variable, ident_1, ident_2, test_use, find_variab
         error=function(e) NULL
       )
 
-      # If NULL → return empty standardized DF
+      # If NULL ? return empty standardized DF
       if (is.null(res)) {
         return(data.frame(
           p_val=numeric(0),
@@ -817,122 +870,7 @@ def seurat_get_down_up_genes(adata, grouping_variable, ident_1, ident_2, test_us
     return down_genes, up_genes
 
 
-def seurat_clustering(adata, resolution, all_adata, all_seurat=None, find_variable_features=True, scale=True):
-
-    pandas2ri.activate()
-    numpy2ri.activate()
-    if all_seurat is None:
-        print('Create Seurat object for all_adata...')
-        all_seurat = create_seurat_object(all_adata.copy())
-    else:
-        print('Using precomputed all_seurat object.')
-    # all_seurat = create_seurat_object(all_adata.copy())
-    print(f'create seurat object of combined')
-    seurat_obj = create_seurat_object(adata.copy())
-    # ro.globalenv['all_seurat'] = all_seurat
-    ro.globalenv['all_seurat'] = ro.r("""
-    function(obj) {
-        unserialize(serialize(obj, NULL))
-    }
-    """)(all_seurat)
-    ro.globalenv['seurat_obj'] = seurat_obj
-
-    print(f'normalize adatas')
-    r("""
-    DefaultAssay(all_seurat) <- 'RNA'
-    DefaultAssay(seurat_obj) <- 'RNA'
-    all_seurat <- NormalizeData(all_seurat)
-    seurat_obj <- NormalizeData(seurat_obj)
-    """)
-
-    print(f'scale adatas')
-    if scale:
-        if issparse(all_adata.X):
-            all_adata.X = all_adata.X.toarray()
-        gene_means = all_adata.X.mean(axis=0)  
-        gene_sds = all_adata.X.std(axis=0, ddof=1)
-        ro.globalenv['gene_means'] = gene_means
-        ro.globalenv['gene_sds'] = gene_sds
-        ro.globalenv['gene_names'] = list(all_adata.var_names)
-
-        r("""
-        all_seurat <- ScaleData(all_seurat)
-        seurat_obj <- ScaleData(seurat_obj)
-        names(gene_means) <- gene_names
-        names(gene_sds) <- gene_names
-        seurat_data <- LayerData(seurat_obj, assay = "RNA", layer = "data")
-        scaled_values <- sweep(seurat_data, 1, gene_means[rownames(seurat_data)], "-")
-        scaled_values <- sweep(scaled_values, 1, gene_sds[rownames(seurat_data)], "/")
-        ld <- LayerData(seurat_obj, assay = "RNA", layer = "scale.data")
-        common_genes <- intersect(rownames(ld), rownames(scaled_values))
-        common_cells <- intersect(colnames(ld), colnames(scaled_values))
-
-        cat('genes(ld) = ', length(rownames(ld)), '\n')
-        cat('cells(ld) = ', length(colnames(ld)), '\n')
-        cat('genes(scaled_values) = ', length(rownames(scaled_values)), '\n')
-        cat('cells(scaled_values) = ', length(colnames(scaled_values)), '\n')
-        cat('length(common_genes) between ld and scaled_value = ', length(common_genes), '\n')
-        cat('length(common_cells) between ld and scaled_value = ', length(common_cells), '\n')
-
-        scaled_aligned <- scaled_values[common_genes, common_cells, drop = FALSE]
-        scaled_aligned <- scaled_aligned[rownames(ld), colnames(ld), drop = FALSE]
-        ld[,] <- as.matrix(scaled_aligned)
-        LayerData(seurat_obj, assay = "RNA", layer = "scale.data") <- ld
-        """)
-    # if scale:
-    #     r("seurat_obj <- ScaleData(seurat_obj)")
-    else:
-        r("all_seurat <- ScaleData(all_seurat, do.scale = FALSE)")
-        r("seurat_obj <- ScaleData(seurat_obj, do.scale = FALSE)")
-    if find_variable_features:
-        r("all_seurat <- FindVariableFeatures(all_seurat, nfeatures = 4000)")
-        r("seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures = 4000)")
-    r("""
-    common_genes <- intersect(rownames(all_seurat), rownames(seurat_obj))
-    all_seurat <- subset(all_seurat, features = common_genes)
-    seurat_obj <- subset(seurat_obj, features = common_genes)
-    """)
-    print(f'Run PCA')
-    if find_variable_features:
-        r("all_seurat <- RunPCA(all_seurat)")
-    else:
-        r("all_features <- rownames(all_seurat)")
-        r("all_seurat <- Seurat::RunPCA(all_seurat, features = all_features)")
-    # Project into all_adata's PCA space
-    r("""
-    common_genes <- intersect(rownames(LayerData(seurat_obj, assay = "RNA", layer = "scale.data")),
-                            rownames(Loadings(all_seurat[["pca"]])))
-    cat('common genes after RunPCA on all_seurat = ', length(common_genes), '\n')
-    seurat_mat <- LayerData(seurat_obj, assay = "RNA", layer = "scale.data")[common_genes, , drop=FALSE]
-    loadings <- Loadings(all_seurat[["pca"]])[common_genes, , drop=FALSE]
-
-    # Project into PCA space
-    pcs <- t(seurat_mat) %*% loadings
-    colnames(pcs) <- colnames(Embeddings(all_seurat, "pca"))
-    rownames(pcs) <- colnames(seurat_obj)
-
-    seurat_obj[["pca"]] <- CreateDimReducObject(
-        embeddings = pcs,
-        key = "PC_",
-        loadings = loadings,
-        assay = "RNA"
-    )
-    """)
-    # common_gene_set = set(r("common_genes"))
-    # with open(f"common_seurat.pkl", "wb") as log_file:
-    #     pickle.dump(common_gene_set, log_file)
-    # r("all_features <- rownames(seurat_obj)")
-    # r("seurat_obj <- Seurat::RunPCA(seurat_obj, features = all_features)")
-    # r("seurat_obj <- RunPCA(seurat_obj)")
-    r(f"num_dim <- min(10, ncol(seurat_obj[['pca']]@cell.embeddings))")
-    r(f"seurat_obj <- FindNeighbors(seurat_obj, dims = 1:num_dim)")
-    r(f"seurat_obj <- FindClusters(seurat_obj, resolution = {resolution})")
-
-    clusters = np.array(r("Idents(seurat_obj)"))
-    print(f'end of seurat clustering')
-    return clusters
-
-def seurat_clustering_python(adata, resolution, all_adata, find_variable_features=True, scale=True):
+def louvain_clustering(adata, resolution, all_adata, find_variable_features=False, scale=True, scale_max=10):
     adata = adata.copy()
     all_adata = all_adata.copy()
 
@@ -959,8 +897,12 @@ def seurat_clustering_python(adata, resolution, all_adata, find_variable_feature
         Xq = adata.X.toarray() if issparse(adata.X) else adata.X
 
         # Fit on all_adata and transform both
-        all_adata.X = scaler.fit_transform(allX)
-        adata.X = scaler.transform(Xq)
+        allX_scaled = scaler.fit_transform(allX)
+        allX_scaled = np.clip(allX_scaled, -scale_max, scale_max)
+        all_adata.X = allX_scaled
+        Xq_scaled = scaler.transform(Xq)
+        Xq_scaled = np.clip(Xq_scaled, -scale_max, scale_max)
+        adata.X = Xq_scaled
     else:
         sc.pp.scale(all_adata, zero_center=False)
         sc.pp.scale(adata, zero_center=False)
@@ -970,8 +912,8 @@ def seurat_clustering_python(adata, resolution, all_adata, find_variable_feature
     sc.tl.pca(all_adata, svd_solver='arpack')
 
     # Project query (adata) into reference PCA space
-    loadings = all_adata.varm['PCs']  # genes × PCs
-    adata.obsm['X_pca'] = adata.X @ loadings  # cells × PCs
+    loadings = all_adata.varm['PCs']  # genes � PCs
+    adata.obsm['X_pca'] = adata.X @ loadings  # cells � PCs
 
     # --- Neighbors & clustering ---
     # sc.pp.neighbors(adata, use_rep='X_pca', n_neighbors=15, n_pcs=40)
@@ -1001,7 +943,6 @@ def create_seurat_object(adata):
     seurat_obj = SeuratObject.CreateSeuratObject(counts=r_expr_matrix, meta_data=r_meta_data)
 
     return seurat_obj
-
 
 def find_neighbors(adata, cell_idx, k=5):
 
@@ -1056,72 +997,20 @@ def mixing_index(pred_adata, true_adata, n_clusters=2, n_pcs=50):
     return average_mixing_index
 
 
-def mixing_index_seurat_old(pred_adata, true_adata, all_adata, train_adata, data_params, ood_primary, ood_modality, resolution=2.0, do_layer_process=True, find_variable_features=True):
-
-    if do_layer_process:
-        total_count = 1e4
-        if issparse(pred_adata.X):
-            exp_data = np.exp(pred_adata.X.data) - 1
-            pred_adata.layers['counts'] = csr_matrix((exp_data, pred_adata.X.indices, pred_adata.X.indptr),
-                                                    shape=pred_adata.X.shape) / total_count
-        else:
-            pred_adata.layers['counts'] = (np.exp(pred_adata.X) - 1) / total_count
-        # pred_adata.layers['counts'] = (np.exp(np.asarray(pred_adata.X))-1)/total_count
-
-    all_adata_minus_stim = \
-        all_adata[~((all_adata.obs[data_params['modality_variable']]==ood_modality) & 
-        (all_adata.obs[data_params['primary_variable']]==ood_primary))].copy()
-    if train_adata:
-        all_adata_minus_test = ad.concat([all_adata_minus_stim, train_adata])
-        all_adata_minus_test.obs_names_make_unique()
-    else:
-        all_adata_minus_test = all_adata_minus_stim.copy()
-    # combined_adata = ad.concat([pred_adata, true_adata], label="batch", keys=["pred", "true"])
-    # combined_adata = ad.concat([pred_adata, true_adata, all_adata], label="batch", keys=["pred", "true", "all_adata"])
-    combined_adata = ad.concat([pred_adata, true_adata, all_adata_minus_test], label="batch", keys=["pred", "true", "all_adata"])
-    combined_adata.obs_names_make_unique()
-    cluster_labels = seurat_clustering(combined_adata, resolution, all_adata=all_adata, find_variable_features=find_variable_features, scale=True)
-    # cluster_labels = seurat_clustering_python(combined_adata, resolution, all_adata=all_adata, find_variable_features=find_variable_features, scale=True)
-    cluster_uniques = np.unique(cluster_labels)
-    print(f'number of clusters: {len(cluster_uniques)}')
-    batch_labels = combined_adata.obs['batch'].values
-
-    pred_correct_clustered = 0
-    num_pred = pred_adata.X.shape[0]
-    num_true = true_adata.X.shape[0]
-    expected_proportion = num_pred/num_true
-
-    for cluster in cluster_uniques:
-        cluster_indices = np.where(cluster_labels == cluster)[0]
-        batch_counts = pd.Series(batch_labels[cluster_indices]).value_counts()
-        N1 = batch_counts.get('pred', 0)
-        N2 = batch_counts.get('true', 0)
-        expected_pred = N2 * expected_proportion
-        pred_correct_clustered += min(N1, expected_pred)
-    
-    average_mixing_index = pred_correct_clustered / num_pred
-
-    return average_mixing_index
-
-
-def mixing_index_seurat(pred_adata, true_adata, all_adata, all_seurat=None, resolution=2.0, do_layer_process=True, find_variable_features=True):
-    if do_layer_process:
-        total_count = 1e4
-        if issparse(pred_adata.X):
-            exp_data = np.exp(pred_adata.X.data) - 1
-            pred_adata.layers['counts'] = csr_matrix((exp_data, pred_adata.X.indices, pred_adata.X.indptr),
-                                                    shape=pred_adata.X.shape) / total_count
-        else:
-            pred_adata.layers['counts'] = (np.exp(pred_adata.X) - 1) / total_count
-        # pred_adata.layers['counts'] = (np.exp(np.asarray(pred_adata.X))-1)/total_count
+def mixing_index_louvain(pred_adata, true_adata, all_adata, resolution=2.0, find_variable_features=False, scale=True):
 
     print(f'combine adatas:')
+
+    # all_adata_minus_stim = \
+    #     all_adata[~((all_adata.obs[data_params['modality_variable']]==ood_modality) & 
+    #     (all_adata.obs[data_params['primary_variable']]==ood_primary))].copy()
+    # combined_adata = ad.concat([pred_adata, true_adata, all_adata_minus_stim], label="batch", keys=["pred", "true", "all_adata"])
+
     combined_adata = ad.concat([pred_adata, true_adata, all_adata], label="batch", keys=["pred", "true", "all_adata"])
     print(f'unique indices:')
     combined_adata.obs_names_make_unique()
-    print(f'start of seurat clustering')
-    cluster_labels = seurat_clustering(combined_adata, resolution, all_adata=all_adata, all_seurat=all_seurat, find_variable_features=find_variable_features, scale=True)
-    # cluster_labels = seurat_clustering_python(combined_adata, resolution, all_adata=all_adata, find_variable_features=find_variable_features, scale=True)
+    print(f'start of louvain clustering')
+    cluster_labels = louvain_clustering(combined_adata, resolution, all_adata=all_adata, find_variable_features=find_variable_features, scale=scale)
     cluster_uniques = np.unique(cluster_labels)
     print(f'number of clusters: {len(cluster_uniques)}')
     batch_labels = combined_adata.obs['batch'].values
@@ -1131,9 +1020,13 @@ def mixing_index_seurat(pred_adata, true_adata, all_adata, all_seurat=None, reso
     num_true = true_adata.X.shape[0]
     expected_proportion = num_pred/num_true
 
+    # temp_folder = os.path.join('temp','clustering')
+    # os.makedirs(temp_folder, exist_ok=True)
+    # log_file = open(f"{temp_folder}/clustering.txt", "a")
     for cluster in cluster_uniques:
         cluster_indices = np.where(cluster_labels == cluster)[0]
         batch_counts = pd.Series(batch_labels[cluster_indices]).value_counts()
+        # log_file.write(f"cluster {cluster}: {batch_counts}")
         N1 = batch_counts.get('pred', 0)
         N2 = batch_counts.get('true', 0)
         expected_pred = N2 * expected_proportion
@@ -1156,7 +1049,7 @@ def mixing_index_kmeans_topdeg(pred_adata, true_adata, true_logfc_df, n_clusters
 
     return mixing_index(pred_adata, true_adata, n_clusters)
 
-def mixing_index_seurat_topdeg(pred_adata, true_adata, true_logfc_df, num_top_deg, do_layer_process, all_adata):
+def mixing_index_louvain_topdeg(pred_adata, true_adata, true_logfc_df, num_top_deg, all_adata):
 
     if len(true_logfc_df) < num_top_deg:
         print(f"the number of significant genes is less than threshold: {num_top_deg}")
@@ -1165,9 +1058,134 @@ def mixing_index_seurat_topdeg(pred_adata, true_adata, true_logfc_df, num_top_de
     top_deg = genes[0:num_top_deg]
     pred_adata = pred_adata[:, pred_adata.var_names.isin(top_deg)].copy()
     true_adata = true_adata[:, true_adata.var_names.isin(top_deg)].copy()
+    all_adata = all_adata[:, true_adata.var_names.isin(top_deg)].copy()
 
-    return mixing_index_seurat(pred_adata, true_adata, all_adata=all_adata, do_layer_process=do_layer_process)
+    return mixing_index_louvain(pred_adata, true_adata, all_adata=all_adata)
 
+
+def classifier_score(pred_X, true_X, held_out_frac=0.2):
+    
+    n_cells = max(1, int(pred_X.shape[0] * held_out_frac))
+
+    test_indices = np.random.choice(pred_X.shape[0], n_cells, replace=False)
+    train_indices = np.setdiff1d(np.arange(pred_X.shape[0]), test_indices)
+    pred_train, pred_test = pred_X[train_indices, :], pred_X[test_indices, :]
+
+    label = ["true"] * true_X.shape[0] + ["pred"] * pred_train.shape[0]
+    train = np.concatenate([true_X, pred_train])
+
+    reg = LogisticRegression(max_iter=1000)
+    reg.fit(train, label)
+    test_labels = reg.predict_proba(pred_test)
+
+    return np.mean(test_labels[:, 1])
+
+# Classifier Two-Sample Test (C2ST)
+def c2st_distance(samples1, samples2, n_splits=5, hidden_layer_sizes=[128, 16], alpha=1e-1, ## (128, 64)
+                  random_state=42, do_pca=True, n_pcs=100, do_scale=False, classifier='mlp', accuracy_or_auc='auc'):
+    sample_threshold_low = 500
+    sample_threshold_high = 2000
+
+    if issparse(samples1):
+        samples1 = samples1.toarray()
+    if issparse(samples2):
+        samples2 = samples2.toarray()
+
+    X = np.concatenate([samples1, samples2], axis=0)
+    y = np.concatenate([np.zeros(len(samples1)), np.ones(len(samples2))])
+
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=None)
+    scores = []
+
+    if X.shape[0] < sample_threshold_low:
+        n_pcs = 2*alpha
+    if X.shape[0] > sample_threshold_high:
+        alpha = 1e-2
+
+    for fold, (train_idx, test_idx) in enumerate(cv.split(X, y)):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        if do_scale:
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X_train)
+            X_test = scaler.transform(X_test)
+
+        if do_pca:
+            n_components = min(n_pcs, X_train.shape[0], X_train.shape[1])
+            pca = PCA(n_components=n_components, random_state=random_state)
+            # print(f"number of PCA components: {n_components}")
+            X_train = pca.fit_transform(X_train)
+            X_test = pca.transform(X_test)
+
+        if classifier == "mlp":
+            clf = TorchMLPClassifier(
+                hidden_layer_sizes=hidden_layer_sizes,
+                dropout=0.5,
+                alpha=alpha,                         ## 1e-3
+                learning_rate=1e-3,
+                batch_size=64,
+                max_iter=1000,
+                validation_fraction=0.1,
+                n_iter_no_change=20,                ## 20
+                random_state=random_state + fold
+            )
+        elif classifier == "sklearn_mlp":
+            clf = MLPClassifier(
+                hidden_layer_sizes=hidden_layer_sizes,
+                alpha=1,                                ## 1e-3
+                max_iter=1000,
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=10,                    ## 20
+                random_state=random_state
+            )
+        elif classifier == "logistic":
+            clf = LogisticRegression(
+                C=1.0,
+                max_iter=1000,
+                random_state=random_state
+            )
+        elif classifier == 'rf':
+            clf = RandomForestClassifier(
+                n_estimators=5000,
+                max_depth=5,
+                min_samples_leaf=10,
+                max_features="sqrt",
+                random_state=random_state,
+                n_jobs=-1
+            )
+        else:
+            raise ValueError(f"Unknown classifier: {classifier}")
+        
+        clf.fit(X_train, y_train)
+
+        pred_prob = clf.predict_proba(X_test)[:, 1]
+        pred_test = (pred_prob >= 0.5).astype(int)
+        
+        test_acc = accuracy_score(y_test, pred_test)
+        test_auc = roc_auc_score(y_test, pred_prob)
+
+        if accuracy_or_auc == 'acc':
+            scores.append(test_acc)
+        else:
+            scores.append(test_auc)
+
+        pred_train_prob = clf.predict_proba(X_train)[:, 1]
+        pred_train = (pred_train_prob >= 0.5).astype(int)
+
+        train_acc = accuracy_score(y_train, pred_train)
+        train_auc = roc_auc_score(y_train, pred_train_prob)
+
+        print(
+            f"Fold {fold + 1}: "
+            f"train acc={train_acc:.4f}, "
+            f"test acc={test_acc:.4f}, "
+            f"train AUC={train_auc:.4f}, "
+            f"test AUC={test_auc:.4f}"
+        )
+
+    return np.mean(scores), np.std(scores)
 
 def logfc_correlation(pred_adata, ctrl_adata, true_logfc_df, ident_1, ident_2, do_layer_process=True):
 
@@ -1461,22 +1479,51 @@ def compute_mmd_topdeg(pred_adata, true_adata, true_logfc_df, num_top_deg):
 
     return compute_mmd(pred_adata, true_adata)
 
+def transposed_rank(pred_adata, real_dict, metric='euclidean'):
+
+    distances = {}
+
+    for p, real_adata in real_dict.items():
+        if metric == 'euclidean':
+            distance = euclidean_distance(pred_adata.X, real_adata.X)
+        elif metric.lower() in ['edistance', 'e-distance']:
+            distance = compute_Edistance(pred_adata, real_adata)
+        elif metric.lower() == 'c2st':
+            distance = c2st_distance(pred_adata.X, real_adata.X)[0]
+        else:
+            raise ValueError(f"\nInvalid metric name: {metric}!!")
+        distances[p] = float(distance)
+    # sorted_ps = sorted(distances, key=distances.get)
+    # normalized_rank = (sorted_ps.index("real"))/(len(distances)-1)
+    ## to attribute worst rank in case of ties:
+    comparisons = []
+    for p, d in distances.items():
+        if p != 'real':
+            comparisons.append(0 if distances['real'] < d else 1)
+    normalized_rank = np.mean(comparisons)
+
+    return normalized_rank
+
+
 def rigorous_mmd_topdeg(true_adata, pred_dict, true_s_adata, primary_variable, true_logfc_df, num_top_deg):
 
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
     n_clusters = int(np.log1p(n_test))
     # n_clusters = 2
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(compute_mmd_topdeg(train_adata.copy(), test_adata.copy(), true_logfc_df, num_top_deg=num_top_deg))
 
@@ -1501,49 +1548,45 @@ def rigorous_mmd_topdeg(true_adata, pred_dict, true_s_adata, primary_variable, t
 
     return metric_dict
 
-def rigorous_mixing_index_seurat(true_adata, pred_dict, true_s_adata, data_params, ood_primary, ood_modality, all_adata, include_best=False):
 
-    all_seurat = create_seurat_object(all_adata.copy())
+def rigorous_mixing_index_louvain(true_adata, pred_dict, true_s_adata, data_params, all_adata, include_best=False, resolution=2):
+
     n_splits = 10
-    # n_splits = 5
     test_fraction = 0.5
     mixing_index_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f'start of repeat {_+1}')
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         print(f'model true, repeat {_+1}:')
-        # mixing_index_dict['true'].append(mixing_index_seurat(train_adata.copy(), test_adata.copy(), all_adata.copy(), None, data_params, ood_primary, ood_modality, do_layer_process=False))
-        mixing_index_dict['true'].append(mixing_index_seurat(train_adata.copy(), test_adata.copy(), all_adata.copy(), all_seurat=all_seurat, do_layer_process=False))
+        mixing_index_dict['true'].append(mixing_index_louvain(train_adata.copy(), test_adata.copy(), all_adata.copy(), resolution=resolution))
 
         for model in pred_dict.keys():
             print(f'model {model}, repeat {_+1}:')
             sampled_adata = adata_sample(pred_dict[model], n_test)
             if model == 'noperturb':
-                # mixing_index_dict[model].append(mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata.copy(), train_adata, data_params, ood_primary, ood_modality, do_layer_process=False))
-                mixing_index_dict[model].append(mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata.copy(), all_seurat=all_seurat, do_layer_process=False))
+                mixing_index_dict[model].append(mixing_index_louvain(sampled_adata, test_adata.copy(), all_adata.copy(), resolution=resolution))
             else:
-                # mixing_index_dict[model].append(mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata.copy(), train_adata, data_params, ood_primary, ood_modality))
-                mixing_index_dict[model].append(mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata.copy(), all_seurat=all_seurat))
+                mixing_index_dict[model].append(mixing_index_louvain(sampled_adata, test_adata.copy(), all_adata.copy(), resolution=resolution))
         
         print(f'model random_all, repeat {_+1}:')
         sampled_true_all = adata_sample(true_s_adata, n_test)
-        # mixing_index_dict['random_all'].append(mixing_index_seurat(sampled_true_all, test_adata.copy(), all_adata.copy(), train_adata, data_params, ood_primary, ood_modality, do_layer_process=False))
-        mixing_index_dict['random_all'].append(mixing_index_seurat(sampled_true_all, test_adata.copy(), all_adata.copy(), all_seurat=all_seurat, do_layer_process=False))
+        mixing_index_dict['random_all'].append(mixing_index_louvain(sampled_true_all, test_adata.copy(), all_adata.copy(), resolution=resolution))
 
         if include_best:
             true_s_dict = split_adata_by_primary(true_s_adata, data_params['primary_variable'])
             mixing_best = 0
             for p in true_s_dict.keys():
                 sampled_adata = adata_sample(true_s_dict[p], n_test)
-                # mixing = mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata.copy(), train_adata, data_params, ood_primary, ood_modality, do_layer_process=False)
-                mixing = mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata.copy(), all_seurat=all_seurat, do_layer_process=False)
+                mixing = mixing_index_louvain(sampled_adata, test_adata.copy(), all_adata.copy(), resolution=resolution)
                 if mixing > mixing_best:
                     mixing_best = mixing
             mixing_index_dict['best'].append(mixing_best)
@@ -1551,37 +1594,40 @@ def rigorous_mixing_index_seurat(true_adata, pred_dict, true_s_adata, data_param
     return mixing_index_dict
 
 
-def rigorous_mixing_index_seurat_topdeg(true_adata, pred_dict, true_s_adata, primary_variable, true_logfc_df, num_top_deg, all_adata):
+def rigorous_mixing_index_louvain_topdeg(true_adata, pred_dict, true_s_adata, primary_variable, true_logfc_df, num_top_deg, all_adata):
 
     n_splits = 10
     test_fraction = 0.5
     mixing_index_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
-        mixing_index_dict['true'].append(mixing_index_seurat_topdeg(train_adata.copy(), test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy(), do_layer_process=False))
+        mixing_index_dict['true'].append(mixing_index_louvain_topdeg(train_adata.copy(), test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy()))
 
         for model in pred_dict.keys():
             sampled_adata = adata_sample(pred_dict[model], n_test)
             if model == 'noperturb':
-                mixing_index_dict[model].append(mixing_index_seurat_topdeg(sampled_adata, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy(), do_layer_process=False))
+                mixing_index_dict[model].append(mixing_index_louvain_topdeg(sampled_adata, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy()))
             else:
-                mixing_index_dict[model].append(mixing_index_seurat_topdeg(sampled_adata, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy(), do_layer_process=True))
+                mixing_index_dict[model].append(mixing_index_louvain_topdeg(sampled_adata, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy()))
         
         sampled_true_all = adata_sample(true_s_adata, n_test)
-        mixing_index_dict['random_all'].append(mixing_index_seurat_topdeg(sampled_true_all, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy(), do_layer_process=False))
+        mixing_index_dict['random_all'].append(mixing_index_louvain_topdeg(sampled_true_all, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy()))
 
         true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
         mixing_best = 0
         for p in true_s_dict.keys():
             sampled_adata = adata_sample(true_s_dict[p], n_test)
-            mixing = mixing_index_seurat_topdeg(sampled_adata, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy(), do_layer_process=False)
+            mixing = mixing_index_louvain_topdeg(sampled_adata, test_adata.copy(), true_logfc_df, num_top_deg, all_adata=all_adata.copy())
             if mixing > mixing_best:
                 mixing_best = mixing
         mixing_index_dict['best'].append(mixing_best)
@@ -1594,17 +1640,20 @@ def rigorous_mixing_index_kmeans(true_adata, pred_dict, true_s_adata, primary_va
     n_splits = 10
     test_fraction = 0.5
     mixing_index_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
     n_clusters = int(np.log1p(n_test))
     # n_clusters = 2
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'       
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         mixing_index_dict['true'].append(mixing_index(train_adata.copy(), test_adata.copy(), n_clusters=n_clusters))
 
@@ -1633,17 +1682,20 @@ def rigorous_mixing_index_kmeans_topdeg(true_adata, pred_dict, true_s_adata, pri
     n_splits = 10
     test_fraction = 0.5
     mixing_index_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
     n_clusters = int(np.log1p(n_test))
     # n_clusters = 2
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         mixing_index_dict['true'].append(mixing_index_kmeans_topdeg(train_adata.copy(), test_adata.copy(), true_logfc_df, n_clusters=n_clusters, num_top_deg=num_top_deg))
 
@@ -1669,14 +1721,17 @@ def rigorous_spearman(true_adata, pred_dict, true_s_adata, primary_variable, inc
     n_splits = 10
     test_fraction = 0.5
     correlation_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         correlation_dict['true'].append(spearman_corr(train_adata, test_adata))
 
@@ -1685,6 +1740,7 @@ def rigorous_spearman(true_adata, pred_dict, true_s_adata, primary_variable, inc
             correlation_dict[model].append(spearman_corr(sampled_adata, test_adata))
         
         sampled_true_all = adata_sample(true_s_adata, n_test)
+        #sampled_true_all.write("/home/karimpour/sc_perturb/outputs/train_predict/sciplex3/random_all/ood/models/MCF7-PD173074/pred_adata.h5ad")
         correlation_dict['random_all'].append(spearman_corr(sampled_true_all, test_adata))
 
         if include_best:
@@ -1718,14 +1774,17 @@ def rigorous_spearman_topdeg(true_adata, pred_dict, true_s_adata, primary_variab
     n_splits = 10
     test_fraction = 0.5
     correlation_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         correlation_dict['true'].append(spearman_corr_topdeg(train_adata, test_adata, true_logfc_df, num_top_deg))
 
@@ -1734,6 +1793,7 @@ def rigorous_spearman_topdeg(true_adata, pred_dict, true_s_adata, primary_variab
             correlation_dict[model].append(spearman_corr_topdeg(sampled_adata, test_adata, true_logfc_df, num_top_deg))
         
         sampled_true_all = adata_sample(true_s_adata, n_test)
+        #sampled_true_all.write("/home/karimpour/sc_perturb/outputs/train_predict/sciplex3/random_all/ood/models/MCF7-PD173074/pred_adata.h5ad")
         correlation_dict['random_all'].append(spearman_corr_topdeg(sampled_true_all, test_adata, true_logfc_df, num_top_deg))
 
         true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
@@ -1753,14 +1813,17 @@ def rigorous_pearson_r2(true_adata, pred_dict, true_s_adata, primary_variable, i
     test_fraction = 0.5
     correlation_dict = defaultdict(list)
     r2_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         correlation_dict['true'].append(pearson_corr(train_adata, test_adata))
         r2_dict['true'].append(r2(train_adata, test_adata))
@@ -1772,6 +1835,7 @@ def rigorous_pearson_r2(true_adata, pred_dict, true_s_adata, primary_variable, i
             r2_dict[model].append(r2(sampled_adata, test_adata))
         
         sampled_true_all = adata_sample(true_s_adata, n_test)
+        #sampled_true_all.write("/home/karimpour/sc_perturb/outputs/train_predict/sciplex3/random_all/ood/models/MCF7-PD173074/pred_adata.h5ad")
         correlation_dict['random_all'].append(pearson_corr(sampled_true_all, test_adata))
         r2_dict['random_all'].append(r2(sampled_true_all, test_adata))
 
@@ -1796,14 +1860,17 @@ def rigorous_r2_skl(true_adata, pred_dict, true_s_adata, primary_variable, inclu
     n_splits = 10
     test_fraction = 0.5
     r2_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         r2_dict['true'].append(r2_skl(train_adata, test_adata))
 
@@ -1830,14 +1897,17 @@ def rigorous_mse(true_adata, pred_dict, true_s_adata, primary_variable, include_
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(mse(train_adata, test_adata))
 
@@ -1864,14 +1934,17 @@ def rigorous_cosine_sim(true_adata, pred_dict, true_s_adata, primary_variable, i
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(cosine_sim(train_adata, test_adata))
 
@@ -1900,15 +1973,17 @@ def rigorous_stepwise_r2(true_adata, pred_dict, true_s_adata, ctrl_adata, primar
     test_fraction = 0.5
     corr_dict = defaultdict(list)
     r2_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
-
+        n_test = len(test_adata)
         
         output = stepwise_r2(ctrl_adata, test_adata, train_adata)
         corr_dict['true'].append(output[0])
@@ -1956,18 +2031,21 @@ def rigorous_stepwise_r2(true_adata, pred_dict, true_s_adata, ctrl_adata, primar
     return corr_dict, r2_dict
 
 def rigorous_wasserstein(true_adata, pred_dict, true_s_adata, primary_variable, include_best=False):
-    n_splits = 10
+    n_splits = 5
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
-        
-        test_adata = true_adata[test_indices].copy()
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
+
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].extend(wasserstein([train_adata.X], [test_adata.X], True))
 
@@ -1997,15 +2075,18 @@ def rigorous_sinkhorn_mahalanobis(true_adata, pred_dict, true_s_adata, primary_v
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
-        test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].extend(sinkhorn_mahalanobis([train_adata.X], [test_adata.X], True))
 
@@ -2028,6 +2109,53 @@ def rigorous_sinkhorn_mahalanobis(true_adata, pred_dict, true_s_adata, primary_v
 
     return metric_dict
 
+
+def rigorous_reg_ot_mahalanobis(true_adata, pred_dict, true_s_adata, all_adata, primary_variable, include_best=False):
+    n_splits = 10
+    test_fraction = 0.5
+    metric_dict = defaultdict(list)
+    n_test = int(test_fraction * true_adata.n_obs)
+
+    X_reference = all_adata.X.toarray() if hasattr(all_adata.X, "toarray") else all_adata.X
+    scaler = StandardScaler(with_mean=True, with_std=True)
+    X_reference_scaled = scaler.fit_transform(X_reference)
+
+    n_components = min(n_test, 100)
+    pca = PCA(n_components=n_components)
+    print(f"number of PCA components: {n_components}")
+    pca.fit(X_reference_scaled)
+
+    for _ in range(n_splits):
+        print(f"start of repeat {_ + 1}")
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
+
+        train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
+
+        metric_dict['true'].append(reg_ot_mahalanobis(train_adata.X, test_adata.X, scaler, pca))
+
+        for model in pred_dict.keys():
+            sampled_adata = adata_sample(pred_dict[model], n_test)
+            metric_dict[model].append(reg_ot_mahalanobis(sampled_adata.X, test_adata.X, scaler, pca))
+        
+        sampled_true_all = adata_sample(true_s_adata, n_test)
+        metric_dict['random_all'].append(reg_ot_mahalanobis(sampled_true_all.X, test_adata.X, scaler, pca))
+
+        if include_best:
+            true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
+            metric_best = 1000000
+            for p in true_s_dict.keys():
+                sampled_adata = adata_sample(true_s_dict[p], n_test)
+                metric = reg_ot_mahalanobis(sampled_adata.X, test_adata.X, scaler, pca)
+                if metric[0] < metric_best:
+                    metric_best = metric[0]
+            metric_dict['best'].append(metric_best)
+
+    return metric_dict
+
+
 def wasserstein_topdeg(pred_adata, true_adata, true_logfc_df, num_top_deg):
 
     if len(true_logfc_df) < num_top_deg:
@@ -2045,17 +2173,20 @@ def rigorous_wasserstein_topdeg(true_adata, pred_dict, true_s_adata, primary_var
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
     n_clusters = int(np.log1p(n_test))
     # n_clusters = 2
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(wasserstein_topdeg(train_adata.copy(), test_adata.copy(), true_logfc_df, num_top_deg=num_top_deg))
 
@@ -2085,15 +2216,18 @@ def rigorous_mmd(true_adata, pred_dict, true_s_adata, primary_variable, include_
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
-        test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(compute_mmd(train_adata, test_adata))
 
@@ -2125,15 +2259,18 @@ def rigorous_local_mmd(true_adata, pred_dict, true_s_adata, primary_variable, k,
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
-        test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(compute_local_mmd(train_adata, test_adata, k=k))
 
@@ -2160,15 +2297,18 @@ def rigorous_Edistance(true_adata, pred_dict, true_s_adata, primary_variable, in
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(compute_Edistance(train_adata, test_adata))
 
@@ -2196,15 +2336,18 @@ def rigorous_local_Edistance(true_adata, pred_dict, true_s_adata, primary_variab
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
-        test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(compute_local_Edistance(train_adata, test_adata, k=k))
 
@@ -2231,15 +2374,18 @@ def rigorous_knn_loss(true_adata, pred_dict, true_s_adata, primary_variable, inc
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_ + 1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
-        test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         metric_dict['true'].append(compute_knn_loss(train_adata, test_adata))
 
@@ -2263,6 +2409,80 @@ def rigorous_knn_loss(true_adata, pred_dict, true_s_adata, primary_variable, inc
     return metric_dict
 
 
+def rigorous_classifier_score(true_adata, pred_dict, true_s_adata, primary_variable, include_best=False):
+    n_splits = 10
+    test_fraction = 0.5
+    metric_dict = defaultdict(list)
+
+    for _ in range(n_splits):
+        print(f"start of repeat {_ + 1}")
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
+        
+        train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
+
+        metric_dict['true'].append(classifier_score(train_adata.X, test_adata.X))
+
+        for model in pred_dict.keys():
+            sampled_adata = adata_sample(pred_dict[model], n_test)
+            metric_dict[model].append(classifier_score(sampled_adata.X, test_adata.X))
+        
+        sampled_true_all = adata_sample(true_s_adata, n_test)
+        metric_dict['random_all'].append(classifier_score(sampled_true_all.X, test_adata.X))
+
+        if include_best:
+            true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
+            metric_best = 0
+            for p in true_s_dict.keys():
+                sampled_adata = adata_sample(true_s_dict[p], n_test)
+                metric = classifier_score(sampled_adata.X, test_adata.X)
+                if metric > metric_best:
+                    metric_best = metric
+            metric_dict['best'].append(metric_best)
+        
+    return metric_dict
+
+def rigorous_c2st_distance(true_adata, pred_dict, true_s_adata, primary_variable, include_best=False):
+    n_splits = 5
+    metric_dict = defaultdict(list)
+
+    for _ in range(n_splits):
+        print(f"start of repeat {_ + 1}")
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
+        
+        train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
+
+        print('model: true')
+        metric_dict['true'].append(c2st_distance(train_adata.X, test_adata.X)[0])
+
+        for model in pred_dict.keys():
+            print(f"model: {model}")
+            sampled_adata = adata_sample(pred_dict[model], n_test)
+            metric_dict[model].append(c2st_distance(sampled_adata.X, test_adata.X)[0])
+        
+        print(f"model: random-all")
+        sampled_true_all = adata_sample(true_s_adata, n_test)
+        metric_dict['random_all'].append(c2st_distance(sampled_true_all.X, test_adata.X)[0])
+
+        if include_best:
+            print("model: best")
+            true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
+            metric_best = 1
+            for p in true_s_dict.keys():
+                sampled_adata = adata_sample(true_s_dict[p], n_test)
+                metric = c2st_distance(sampled_adata.X, test_adata.X)[0]
+                if metric < metric_best:
+                    metric_best = metric
+            metric_dict['best'].append(metric_best)
+        
+    return metric_dict
+
+
 def rigorous_deg_f1(true_adata, ctrl_adata, pred_dict, true_s_adata, primary_variable, ood_primary, include_best=False):
     # n_splits = 10
     n_splits = 5
@@ -2275,7 +2495,7 @@ def rigorous_deg_f1(true_adata, ctrl_adata, pred_dict, true_s_adata, primary_var
     recall_up_dict = defaultdict(list)
     typeI_down_dict = defaultdict(list)
     typeI_up_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     temp_folder = os.path.join('temp', 'deg_files')
     os.makedirs(temp_folder, exist_ok=True)
@@ -2286,11 +2506,14 @@ def rigorous_deg_f1(true_adata, ctrl_adata, pred_dict, true_s_adata, primary_var
         print(f"start of repeat: {i+1}")
         # log_file.write("####################################  ")
         # log_file.write(f" repeat: {i+1}\n")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{i}']=='train'
+        test_indices = true_adata.obs[f'split_{i}']=='test'
         
-        test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         ctrl_sample = adata_sample(ctrl_adata, n_test)
 
@@ -2381,20 +2604,23 @@ def rigorous_deg_f1(true_adata, ctrl_adata, pred_dict, true_s_adata, primary_var
     return f1_down_dict, f1_up_dict, precision_down_dict, precision_up_dict, recall_down_dict, recall_up_dict, typeI_down_dict, typeI_up_dict
 
 
-def rigorous_store_deg_df(true_adata, ctrl_adata, pred_dict, true_s_adata):
+def rigorous_store_deg_df_old(true_adata, ctrl_adata, pred_dict, true_s_adata):
     # n_splits = 10
     n_splits = 5
     test_fraction = 0.5
     deg_df_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for i in range(n_splits):
         print(f"start of repeat: {i+1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{i}']=='train'
+        test_indices = true_adata.obs[f'split_{i}']=='test'
         
-        test_adata = true_adata[test_indices].copy()
         train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         ctrl_sample = adata_sample(ctrl_adata, n_test)
 
@@ -2436,20 +2662,83 @@ def rigorous_store_deg_df(true_adata, ctrl_adata, pred_dict, true_s_adata):
     return deg_df_dict
 
 
+def rigorous_store_deg_df(true_adata, ctrl_adata, pred_dict, true_s_adata):
+    n_splits = 5
+    test_fraction = 0.5
+    deg_df_dict = defaultdict(list)
+
+    for i in range(n_splits):
+        print(f"start of repeat: {i+1}")
+        train_indices = true_adata.obs[f'split_{i}']=='train'
+        test_indices = true_adata.obs[f'split_{i}']=='test'
+        
+        train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
+
+        ctrl_sample = adata_sample(ctrl_adata, n_test)
+
+        combined_test = ad.concat([test_adata, ctrl_sample], label="batch", keys=["stimulated", "ctrl"])
+        combined_test.obs_names_make_unique()
+        # print(f"real: before layer process, max counts: {combined_test.layers['counts'].max()}")
+        helper_do_layer_process(combined_test)
+        # print(f"real: after layer process, max counts: {combined_test.layers['counts'].max()}")
+        deg_df = seurat_deg(combined_test, "batch", "stimulated", "ctrl", test_use="MAST")
+        deg_df_dict['real'].append(deg_df)
+        print(f"save model: true-{i+1}")
+        combined_train = ad.concat([train_adata, ctrl_sample], label="batch", keys=["stimulated", "ctrl"])
+        combined_train.obs_names_make_unique()
+        helper_do_layer_process(combined_train)
+        deg_df = seurat_deg(combined_train, "batch", "stimulated", "ctrl", test_use="MAST")
+        deg_df_dict['true'].append(deg_df)
+
+        for model in pred_dict.keys():
+            pred_adata = pred_dict[model]
+            pred_adata_sample = adata_sample(pred_adata, n_test)
+            print(f"save model: {model}-{i+1}")
+            combined_pred = ad.concat([pred_adata_sample, ctrl_sample], label="batch", keys=["stimulated", "ctrl"])
+            combined_pred.obs_names_make_unique()
+            helper_do_layer_process(combined_pred)
+            deg_df = seurat_deg(combined_pred, "batch", "stimulated", "ctrl", test_use="MAST")
+            deg_df_dict[model].append(deg_df)
+    
+        sampled_true_all = adata_sample(true_s_adata, n_test)
+        print(f"save model: random_all-{i+1}")
+        combined_pred = ad.concat([sampled_true_all, ctrl_sample], label="batch", keys=["stimulated", "ctrl"])
+        combined_pred.obs_names_make_unique()
+        helper_do_layer_process(combined_pred)
+        deg_df = seurat_deg(combined_pred, "batch", "stimulated", "ctrl", test_use="MAST")
+        deg_df_dict['random_all'].append(deg_df)
+    
+    return deg_df_dict
+
+def helper_do_layer_process(adata, total_count=1e4):
+    if issparse(adata.X):
+        exp_data = np.exp(adata.X.data) - 1
+        adata.layers['counts'] = csr_matrix((exp_data, adata.X.indices, adata.X.indptr),
+                                                shape=adata.X.shape) / total_count
+    else:
+        adata.layers['counts'] = (np.exp(adata.X) - 1) / total_count
+    return adata
+
+
 def rigorous_logfc_correlation(true_adata, pred_dict, ctrl_adata, true_s_adata, primary_variable, include_best=False):
 
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(list)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for _ in range(n_splits):
         print(f"start of repeat {_+1}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{_}']=='train'
+        test_indices = true_adata.obs[f'split_{_}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         ctrl_sample = adata_sample(ctrl_adata, n_test)
         ## check using all ctrl adata
@@ -2460,24 +2749,24 @@ def rigorous_logfc_correlation(true_adata, pred_dict, ctrl_adata, true_s_adata, 
         true_logfc_df = seurat_deg(
             ctrl_true_adata, "batch", "stimulated", "ctrl", test_use='MAST', find_variable_features=False)
 
-        metric_dict['true'].append(logfc_correlation(train_adata.copy(), ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        metric_dict['true'].append(logfc_correlation(train_adata.copy(), ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
         for model in pred_dict.keys():
             sampled_adata = adata_sample(pred_dict[model], n_test)
             if model == 'noperturb':
-                metric_dict[model].append(logfc_correlation(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+                metric_dict[model].append(logfc_correlation(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
             else:
                 metric_dict[model].append(logfc_correlation(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
         
         sampled_true_all = adata_sample(true_s_adata, n_test)
-        metric_dict['random_all'].append(logfc_correlation(sampled_true_all, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        metric_dict['random_all'].append(logfc_correlation(sampled_true_all, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
         if include_best:
             true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
             metric_best = 0
             for p in true_s_dict.keys():
                 sampled_adata = adata_sample(true_s_dict[p], n_test)
-                metric = logfc_correlation(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False)
+                metric = logfc_correlation(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True)
                 if metric > metric_best:
                     metric_best = metric
             metric_dict['best'].append(metric_best)
@@ -2489,15 +2778,18 @@ def rigorous_logfc_dict(true_adata, pred_dict, ctrl_adata, true_s_adata, primary
     n_splits = 10
     test_fraction = 0.5
     metric_dict = defaultdict(dict)
-    n_test = int(test_fraction * true_adata.n_obs)
+    # n_test = int(test_fraction * true_adata.n_obs)
 
     for repeat in range(1, n_splits+1):
         print(f"start of repeat {repeat}")
-        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
-        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        # test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        # train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        train_indices = true_adata.obs[f'split_{repeat-1}']=='train'
+        test_indices = true_adata.obs[f'split_{repeat-1}']=='test'
         
         train_adata = true_adata[train_indices].copy()
         test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
 
         ctrl_sample = adata_sample(ctrl_adata, n_test)
         ## check using all ctrl adata
@@ -2508,22 +2800,58 @@ def rigorous_logfc_dict(true_adata, pred_dict, ctrl_adata, true_s_adata, primary
         true_logfc_df = seurat_deg(
             ctrl_true_adata, "batch", "stimulated", "ctrl", test_use='MAST', find_variable_features=False)
 
-        metric_dict['true'][repeat] = logfc_dict(train_adata.copy(), ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False)
+        metric_dict['true'][repeat] = logfc_dict(train_adata.copy(), ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True)
 
         for model in pred_dict.keys():
             sampled_adata = adata_sample(pred_dict[model], n_test)
             if model == 'noperturb':
-                metric_dict[model][repeat] = logfc_dict(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False)
+                metric_dict[model][repeat] = logfc_dict(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True)
             else:
                 metric_dict[model][repeat] = logfc_dict(sampled_adata, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True)
         
         sampled_true_all = adata_sample(true_s_adata, n_test)
-        metric_dict['random_all'][repeat] = logfc_dict(sampled_true_all, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False)
+        metric_dict['random_all'][repeat] = logfc_dict(sampled_true_all, ctrl_sample.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True)
 
     return metric_dict
 
 
-def noise_effect_spearman(true_adata, true_s_adata, n_repeats=3, percent_interval=10, method='sampling'):
+def rigorous_transposed_rank(true_adata, pred_dict, true_s_adata, primary_variable, ood_primary, metric='euclidean', n_splits=10):
+    metric_dict = defaultdict(list)
+
+    for repeat in range(1, n_splits+1):
+        print(f"start of repeat {repeat}")
+        split_col = f"split_{repeat - 1}"
+        train_indices = true_adata.obs[split_col]=='train'
+        test_indices = true_adata.obs[split_col]=='test'
+        
+        train_adata = true_adata[train_indices].copy()
+        test_adata = true_adata[test_indices].copy()
+        n_test = len(test_adata)
+
+        store_real_dict = {}
+        store_real_dict['real'] = test_adata
+        other_primaries = true_s_adata.obs[primary_variable].unique()
+        other_primaries = [m for m in other_primaries if m != ood_primary]
+        for p in other_primaries:
+            population = true_s_adata[(true_s_adata.obs[primary_variable]==p) &
+                                    (true_s_adata.obs[split_col]=='test')].copy()
+            if population.n_obs > 0:
+                store_real_dict[p] = adata_sample(population, n_test)
+
+        print(f"model: true")
+        metric_dict['true'].append(transposed_rank(train_adata, store_real_dict, metric=metric))
+        for model in pred_dict.keys():
+            print(f"model: {model}")
+            sampled_adata = adata_sample(pred_dict[model], n_test)
+            metric_dict[model].append(transposed_rank(sampled_adata, store_real_dict, metric=metric))
+        print(f"model: random-perturb")
+        sampled_true_all = adata_sample(true_s_adata, n_test)
+        metric_dict['random_all'].append(transposed_rank(sampled_true_all, store_real_dict, metric=metric))
+
+    return metric_dict
+
+
+def noise_effect_spearman(true_adata, true_s_adata, n_repeats=3, percent_interval=10, method='sampling', mode='nested'):
     test_fraction = 0.5
     spearman_dict = defaultdict(list)
     n_test = int(test_fraction * true_adata.n_obs)
@@ -2550,7 +2878,7 @@ def noise_effect_spearman(true_adata, true_s_adata, n_repeats=3, percent_interva
             print(f"repeat: {repeat+1}, percent: {p}")
             p_temp = 0 if p==0 else percent_interval
             if mode == 'nested':
-                train_adata = add_noise(train_adata, true_s_adata, gene_sets[int(p/percent_interval)], method, p=_temp)
+                train_adata = add_noise(train_adata, true_s_adata, gene_sets[int(p/percent_interval)], method, p=p_temp)
                 metric = spearman_corr(train_adata, test_adata)
             else:
                 noised_train_adata = add_noise(train_adata.copy(), true_s_adata, None, method, p=p)
@@ -2593,6 +2921,55 @@ def noise_effect_wasserstein(true_adata, true_s_adata, n_repeats=3, percent_inte
                 noised_train_adata = add_noise(train_adata.copy(), true_s_adata, None, method, p=p)
                 metric = wasserstein([noised_train_adata.X], [test_adata.X], True)[0]
                 # metric = -np.log10(metric)
+            metric_list.append(metric)
+        metric_dict[f"repeat {repeat+1}"] = pd.DataFrame({'n': percents, 'true_positives': metric_list})
+
+    return metric_dict
+
+
+def noise_effect_reg_ot_mahalanobis(true_adata, true_s_adata, all_adata, n_repeats=3, percent_interval=10, method='random_all', mode='nested'):
+    test_fraction = 0.5
+    metric_dict = defaultdict(list)
+    n_test = int(test_fraction * true_adata.n_obs)
+    percents = np.arange(0,101,percent_interval)
+
+    X_reference = all_adata.X.toarray() if hasattr(all_adata.X, "toarray") else all_adata.X
+    # Fit StandardScaler on reference
+    scaler = StandardScaler(with_mean=True, with_std=True)
+    X_reference_scaled = scaler.fit_transform(X_reference)
+
+    # Fit PCA on reference
+    n_components = min(n_test, 100)
+    pca = PCA(n_components=n_components)
+    print(f"number of PCA components: {n_components}")
+    pca.fit(X_reference_scaled)
+
+    for repeat in range(n_repeats):
+        print(f"start of repeat {repeat+1}")
+        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        
+        test_adata = true_adata[test_indices].copy()
+        train_adata = true_adata[train_indices].copy()
+        
+        gene_sets = split_genes_to_groups(true_adata.n_vars, len(percents)-1)
+        gene_sets.insert(0, np.array([]).astype(int))
+        metric_list = []
+
+        if method == 'random_all':
+            if issparse(true_s_adata.X):
+                true_s_adata.X = true_s_adata.X.toarray()
+            if issparse(true_s_adata.layers['counts']):
+                true_s_adata.layers['counts'] = true_s_adata.layers['counts'].toarray()
+        for p in percents:
+            print(f"repeat: {repeat+1}, percent: {p}")
+            p_temp = 0 if p==0 else percent_interval
+            if mode == 'nested':
+                train_adata = add_noise(train_adata, true_s_adata, gene_sets[int(p/percent_interval)], method, p=p_temp)
+                metric = reg_ot_mahalanobis(train_adata.X, test_adata.X, scaler, pca)
+            else:
+                noised_train_adata = add_noise(train_adata.copy(), true_s_adata, None, method, p=p)
+                metric = reg_ot_mahalanobis(noised_train_adata.X, test_adata.X, scaler, pca)
             metric_list.append(metric)
         metric_dict[f"repeat {repeat+1}"] = pd.DataFrame({'n': percents, 'true_positives': metric_list})
 
@@ -2703,9 +3080,37 @@ def noise_effect_Edistance(true_adata, true_s_adata, n_repeats=3, percent_interv
             if mode == 'nested':
                 train_adata = add_noise(train_adata, true_s_adata, gene_sets[int(p/percent_interval)], method, p=p_temp)
                 metric = compute_Edistance(train_adata, test_adata)
+                ### to be deleted:
+                if repeat == 0:
+                    os.makedirs(f"noise_pca_plots", exist_ok=True)
+                    combined_adata = ad.concat([train_adata, test_adata], label="batch", keys=["noised", "true"])
+                    combined_adata.obs_names_make_unique()
+                    pca = PCA(n_components=50)
+                    combined_adata.obsm["X_pca"] = pca.fit_transform(combined_adata.X)
+                    fig, ax = plt.subplots(figsize=(6,6))
+                    for batch in ["noised", "true"]:
+                        plt.scatter(combined_adata[combined_adata.obs['batch']==batch].obsm['X_pca'][:,0], 
+                                    combined_adata[combined_adata.obs['batch']==batch].obsm['X_pca'][:,1], label=batch)
+                    plt.legend()
+                    plt.savefig(f'noise_pca_plots/noise_{p}.png')
+                    plt.close()
             else:
                 noised_train_adata = add_noise(train_adata.copy(), true_s_adata, None, method, p=p)
                 metric = compute_Edistance(noised_train_adata, test_adata)
+                ### to be deleted:
+                if repeat == 0:
+                    os.makedirs(f"noise_pca_plots", exist_ok=True)
+                    combined_adata = ad.concat([noised_train_adata, test_adata], label="batch", keys=["noised", "true"])
+                    combined_adata.obs_names_make_unique()
+                    pca = PCA(n_components=50)
+                    combined_adata.obsm["X_pca"] = pca.fit_transform(combined_adata.X)
+                    fig, ax = plt.subplots(figsize=(6,6))
+                    for batch in ["noised", "true"]:
+                        plt.scatter(combined_adata[combined_adata.obs['batch']==batch].obsm['X_pca'][:,0], 
+                                    combined_adata[combined_adata.obs['batch']==batch].obsm['X_pca'][:,1], label=batch)
+                    plt.legend()
+                    plt.savefig(f'noise_pca_plots/noise_{p}.png')
+                    plt.close()
             metric_list.append(metric)
         metric_dict[f"repeat {repeat+1}"] = pd.DataFrame({'n': percents, 'true_positives': metric_list})
     return metric_dict
@@ -2783,9 +3188,44 @@ def noise_effect_knn_loss(true_adata, true_s_adata, n_repeats=3, percent_interva
         metric_dict[f"repeat {repeat+1}"] = pd.DataFrame({'n': percents, 'true_positives': metric_list})
     return metric_dict
 
+def noise_effect_c2st_distance(true_adata, true_s_adata, n_repeats=3, percent_interval=10, method='random_all', mode='nested'):
+    test_fraction = 0.5
+    metric_dict = defaultdict(list)
+    n_test = int(test_fraction * true_adata.n_obs)
+    percents = np.arange(0,101,percent_interval)
 
-def noise_effect_mixing_index(true_adata, true_s_adata, all_adata, n_repeats=3, percent_interval=10, method='random_all', mode='nested'):
-    all_seurat = create_seurat_object(all_adata.copy())
+    for repeat in range(n_repeats):
+        print(f"start of repeat {repeat+1}")
+        test_indices = np.random.choice(true_adata.n_obs, size=n_test, replace=False)
+        train_indices = np.setdiff1d(np.arange(true_adata.n_obs), test_indices)
+        
+        test_adata = true_adata[test_indices].copy()
+        train_adata = true_adata[train_indices].copy()
+        
+        gene_sets = split_genes_to_groups(true_adata.n_vars, len(percents)-1)
+        gene_sets.insert(0, np.array([]).astype(int))
+        metric_list = []
+
+        if method == 'random_all':
+            if issparse(true_s_adata.X):
+                true_s_adata.X = true_s_adata.X.toarray()
+            if issparse(true_s_adata.layers['counts']):
+                true_s_adata.layers['counts'] = true_s_adata.layers['counts'].toarray()
+        for p in percents:
+            print(f"repeat: {repeat+1}, percent: {p}")
+            p_temp = 0 if p==0 else percent_interval
+            if mode == 'nested':
+                train_adata = add_noise(train_adata, true_s_adata, gene_sets[int(p/percent_interval)], method, p=p_temp)
+                metric = c2st_distance(train_adata.X, test_adata.X)[0]
+            else:
+                noised_train_adata = add_noise(train_adata.copy(), true_s_adata, None, method, p=p)
+                metric = c2st_distance(noised_train_adata.X, test_adata.X)[0]
+            metric_list.append(metric)
+        metric_dict[f"repeat {repeat+1}"] = pd.DataFrame({'n': percents, 'true_positives': metric_list})
+    return metric_dict
+
+def noise_effect_mixing_index_louvain(true_adata, true_s_adata, all_adata, n_repeats=3, percent_interval=10, 
+                                      method='random_all', mode='nested', resolution=2):
     test_fraction = 0.5
     mixing_index_dict = defaultdict(list)
     n_test = int(test_fraction * true_adata.n_obs)
@@ -2813,10 +3253,10 @@ def noise_effect_mixing_index(true_adata, true_s_adata, all_adata, n_repeats=3, 
             p_temp = 0 if p==0 else percent_interval
             if mode == 'nested':
                 train_adata = add_noise(train_adata, true_s_adata, gene_sets[int(p/percent_interval)], method, p=p_temp)
-                metric = mixing_index_seurat(train_adata, test_adata, all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False)
+                metric = mixing_index_louvain(train_adata, test_adata, all_adata=all_adata.copy(), resolution=resolution)
             else:
                 noised_train_adata = add_noise(train_adata.copy(), true_s_adata, None, method, p=p)
-                metric = mixing_index_seurat(noised_train_adata, test_adata, all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False)
+                metric = mixing_index_louvain(noised_train_adata, test_adata, all_adata=all_adata.copy(), resolution=resolution)
             mixing_list.append(metric)
         mixing_index_dict[f"repeat {repeat+1}"] = pd.DataFrame({'n': percents, 'true_positives': mixing_list})
     return mixing_index_dict
@@ -3032,6 +3472,19 @@ def rigorous_subset_Edistance(true_adata, ctrl_adata, pred_dict, true_s_adata, p
 
     return non_trivial_dict, trivial_dict, non_significant_dict, [len(non_trivial), len(trivial), len(non_significant)]
 
+def rigorous_subset_c2st_distance(true_adata, ctrl_adata, pred_dict, true_s_adata, primary_variable, true_logfc_df):
+    non_significant, trivial, non_trivial = define_trivial(true_adata, ctrl_adata, true_logfc_df)
+    print(f"# non_significant: {len(non_significant)}\n# trivial: {len(trivial)}\n# non_trivial: {len(non_trivial)}")
+    
+    pred_subset = {pred: adata[:, non_trivial].copy() for pred, adata in pred_dict.items()}
+    non_trivial_dict = rigorous_c2st_distance(true_adata[:,non_trivial].copy(), pred_subset, true_s_adata[:,non_trivial].copy(), primary_variable)
+    pred_subset = {pred: adata[:, trivial].copy() for pred, adata in pred_dict.items()}
+    trivial_dict = rigorous_c2st_distance(true_adata[:,trivial].copy(), pred_subset, true_s_adata[:,trivial].copy(), primary_variable)
+    pred_subset = {pred: adata[:, non_significant].copy() for pred, adata in pred_dict.items()}
+    non_significant_dict = rigorous_c2st_distance(true_adata[:,non_significant].copy(), pred_subset, true_s_adata[:,non_significant].copy(), primary_variable)
+
+    return non_trivial_dict, trivial_dict, non_significant_dict, [len(non_trivial), len(trivial), len(non_significant)]
+
 def rigorous_subset_knn_loss(true_adata, ctrl_adata, pred_dict, true_s_adata, primary_variable, true_logfc_df):
     non_significant, trivial, non_trivial = define_trivial(true_adata, ctrl_adata, true_logfc_df)
     print(f"# non_significant: {len(non_significant)}\n# trivial: {len(trivial)}\n# non_trivial: {len(non_trivial)}")
@@ -3085,7 +3538,7 @@ def rigorous_subset_mixing_index_kmeans(true_adata, ctrl_adata, pred_dict, true_
 
     return non_trivial_dict, trivial_dict, non_significant_dict, [len(non_trivial), len(trivial), len(non_significant)]
 
-def rigorous_subset_mixing_index_seurat(true_adata, ctrl_adata, pred_dict, true_s_adata, data_params, ood_primary, ood_modality, true_logfc_df, all_adata):
+def rigorous_subset_mixing_index_louvain(true_adata, ctrl_adata, pred_dict, true_s_adata, data_params, true_logfc_df, all_adata, resolution=2):
     non_significant, trivial, non_trivial = define_trivial(true_adata, ctrl_adata, true_logfc_df)
     print(f"# non_significant: {len(non_significant)}\n# trivial: {len(trivial)}\n# non_trivial: {len(non_trivial)}")
     
@@ -3096,7 +3549,7 @@ def rigorous_subset_mixing_index_seurat(true_adata, ctrl_adata, pred_dict, true_
         "Skipping mixing-index computation.")
     else:
         pred_subset = {pred: adata[:, trivial].copy() for pred, adata in pred_dict.items()}
-        trivial_dict = rigorous_mixing_index_seurat(true_adata[:,trivial].copy(), pred_subset, true_s_adata[:,trivial].copy(), data_params, ood_primary, ood_modality, all_adata=all_adata[:,trivial].copy())
+        trivial_dict = rigorous_mixing_index_louvain(true_adata[:,trivial].copy(), pred_subset, true_s_adata[:,trivial].copy(), data_params, all_adata=all_adata[:,trivial].copy(), resolution=resolution)
     if len(non_trivial) < 15:
         non_trivial_dict = {pred:None for pred in pred_dict.keys()}
         non_trivial_dict.update({'true':None, 'random_all':None})
@@ -3104,9 +3557,9 @@ def rigorous_subset_mixing_index_seurat(true_adata, ctrl_adata, pred_dict, true_
         "Skipping mixing-index computation.")
     else:
         pred_subset = {pred: adata[:, non_trivial].copy() for pred, adata in pred_dict.items()}
-        non_trivial_dict = rigorous_mixing_index_seurat(true_adata[:,non_trivial].copy(), pred_subset, true_s_adata[:,non_trivial].copy(), data_params, ood_primary, ood_modality, all_adata=all_adata[:,non_trivial].copy())
+        non_trivial_dict = rigorous_mixing_index_louvain(true_adata[:,non_trivial].copy(), pred_subset, true_s_adata[:,non_trivial].copy(), data_params, all_adata=all_adata[:,non_trivial].copy(), resolution=resolution)
     pred_subset = {pred: adata[:, non_significant].copy() for pred, adata in pred_dict.items()}
-    non_significant_dict = rigorous_mixing_index_seurat(true_adata[:,non_significant].copy(), pred_subset, true_s_adata[:,non_significant].copy(), data_params, ood_primary, ood_modality, all_adata=all_adata[:,non_significant].copy())
+    non_significant_dict = rigorous_mixing_index_louvain(true_adata[:,non_significant].copy(), pred_subset, true_s_adata[:,non_significant].copy(), data_params, all_adata=all_adata[:,non_significant].copy(), resolution=resolution)
 
     # return non_trivial_dict, non_significant_dict, [len(non_trivial), len(non_significant)]
     return non_trivial_dict, trivial_dict, non_significant_dict, [len(non_trivial), len(trivial), len(non_significant)]
@@ -3128,10 +3581,9 @@ def rigorous_subset_deg_f1(true_adata, ctrl_adata, pred_dict, true_s_adata, prim
 
     return non_trivial_dicts, trivial_dicts, [len(non_trivial), len(trivial), len(non_significant)], down_up_dict
 
-def semi_rigorous_mixing_index_seurat(test_adata, pred_dict, true_s_adata, primary_variable, all_adata, train_adata=None, include_best=False, resolution=2.0):
+def semi_rigorous_mixing_index_louvain(test_adata, pred_dict, true_s_adata, primary_variable, all_adata, train_adata=None, include_best=False, resolution=2.0):
 
     mixing_index_dict = defaultdict(list)
-    all_seurat = create_seurat_object(all_adata.copy())
 
     if train_adata is not None:
         n_test_balanced = int((test_adata.n_obs + train_adata.n_obs)/2)
@@ -3139,7 +3591,7 @@ def semi_rigorous_mixing_index_seurat(test_adata, pred_dict, true_s_adata, prima
         true_s_adata_without_train = true_s_adata[~true_s_adata.obs.index.isin(train_adata.obs.index)].copy()
         train_adata = adata_sample(train_adata, n_test_balanced)
         print(f'model true:')
-        mixing_index_dict['true'].append(mixing_index_seurat(train_adata.copy(), test_adata.copy(), all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False, resolution=resolution))
+        mixing_index_dict['true'].append(mixing_index_louvain(train_adata.copy(), test_adata.copy(), all_adata=all_adata.copy(), resolution=resolution))
     else:
         n_test_balanced = int(test_adata.n_obs/2)
         chosen_index = np.random.choice(test_adata.n_obs, size=1)
@@ -3148,24 +3600,24 @@ def semi_rigorous_mixing_index_seurat(test_adata, pred_dict, true_s_adata, prima
         test_adata = adata_sample(test_adata, n_test_balanced)
         # mixing_index_dict['true'].append(0)
         print(f'model true:')
-        mixing_index_dict['true'].append(mixing_index_seurat(train_adata.copy(), test_adata.copy(), all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False, resolution=resolution))
+        mixing_index_dict['true'].append(mixing_index_louvain(train_adata.copy(), test_adata.copy(), all_adata=all_adata.copy(), resolution=resolution))
         true_s_adata_without_train = true_s_adata.copy()
 
     for model in pred_dict.keys():
         sampled_adata = adata_sample(pred_dict[model], n_test_balanced)
         print(f'model {model}:')
         if model == 'noperturb':
-            mixing_index_dict[model].append(mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False, resolution=resolution))
+            mixing_index_dict[model].append(mixing_index_louvain(sampled_adata, test_adata.copy(), all_adata=all_adata.copy(), resolution=resolution))
         else:
-            mixing_index_dict[model].append(mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata=all_adata.copy(), all_seurat=all_seurat, resolution=resolution))
+            mixing_index_dict[model].append(mixing_index_louvain(sampled_adata, test_adata.copy(), all_adata=all_adata.copy(), resolution=resolution))
     
     sampled_true_all = adata_sample(true_s_adata, n_test_balanced)
     print(f'model random_all + seen_true:')
-    mixing_index_dict['random_all+seen_true'].append(mixing_index_seurat(sampled_true_all, test_adata.copy(), all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False, resolution=resolution))
+    mixing_index_dict['random_all+seen_true'].append(mixing_index_louvain(sampled_true_all, test_adata.copy(), all_adata=all_adata.copy(), resolution=resolution))
 
     sampled_true_all_without_train = adata_sample(true_s_adata_without_train, n_test_balanced)
     print(f'model random_all:')
-    mixing_index_dict['random_all'].append(mixing_index_seurat(sampled_true_all_without_train, test_adata.copy(), all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False, resolution=resolution))
+    mixing_index_dict['random_all'].append(mixing_index_louvain(sampled_true_all_without_train, test_adata.copy(), all_adata=all_adata.copy(), resolution=resolution))
 
     if include_best:
         true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
@@ -3173,7 +3625,7 @@ def semi_rigorous_mixing_index_seurat(test_adata, pred_dict, true_s_adata, prima
         for p in true_s_dict.keys():
             sampled_adata = adata_sample(true_s_dict[p], n_test_balanced)
             print(f'model best:')
-            mixing = mixing_index_seurat(sampled_adata, test_adata.copy(), all_adata=all_adata.copy(), all_seurat=all_seurat, do_layer_process=False, resolution=resolution)
+            mixing = mixing_index_louvain(sampled_adata, test_adata.copy(), all_adata=all_adata.copy(), resolution=resolution)
             if mixing > mixing_best:
                 mixing_best = mixing
         mixing_index_dict['best'].append((mixing_best))
@@ -3201,24 +3653,24 @@ def semi_rigorous_logfc_correlation(test_adata, pred_dict, ctrl_adata, true_s_ad
     true_logfc_df = seurat_deg(
         ctrl_true_adata, "batch", "stimulated", "ctrl", test_use='MAST', find_variable_features=False)
     metric_dict['true'].append(logfc_correlation(
-        train_adata.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        train_adata.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
     for model in pred_dict.keys():
         sampled_adata = adata_sample(pred_dict[model], n_test_balanced)
         if model == 'noperturb':
             metric_dict[model].append(logfc_correlation(
-                sampled_adata.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+                sampled_adata.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
         else:
             metric_dict[model].append(logfc_correlation(
                 sampled_adata.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
     
     sampled_true_all = adata_sample(true_s_adata, n_test_balanced)
     metric_dict['random_all+seen_true'].append(logfc_correlation(
-        sampled_true_all.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        sampled_true_all.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
     sampled_true_all_without_train = adata_sample(true_s_adata_without_train, n_test_balanced)
     metric_dict['random_all'].append(logfc_correlation(
-        sampled_true_all_without_train.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        sampled_true_all_without_train.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
     if include_best:
         true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
@@ -3226,7 +3678,7 @@ def semi_rigorous_logfc_correlation(test_adata, pred_dict, ctrl_adata, true_s_ad
         for p in true_s_dict.keys():
             sampled_adata = adata_sample(true_s_dict[p], n_test_balanced)
             corr = logfc_correlation(
-                sampled_adata.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False)
+                sampled_adata.copy(), ctrl_adata.copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True)
             if corr > corr_best:
                 corr_best = corr
         metric_dict['best'].append(corr_best)
@@ -3261,24 +3713,24 @@ def semi_rigorous_nontrivial_logfc_correlation(test_adata, pred_dict, ctrl_adata
     # true_logfc_df = seurat_deg(
     #     ctrl_true_adata, "batch", "stimulated", "ctrl", test_use='MAST', find_variable_features=False)
     metric_dict['true'].append(logfc_correlation(
-        train_adata[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        train_adata[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
     for model in pred_dict.keys():
         sampled_adata = adata_sample(pred_dict[model], n_test_balanced)
         if model == 'noperturb':
             metric_dict[model].append(logfc_correlation(
-                sampled_adata[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+                sampled_adata[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
         else:
             metric_dict[model].append(logfc_correlation(
                 sampled_adata[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
     
     sampled_true_all = adata_sample(true_s_adata, n_test_balanced)
     metric_dict['random_all+seen_true'].append(logfc_correlation(
-        sampled_true_all[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        sampled_true_all[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
     sampled_true_all_without_train = adata_sample(true_s_adata_without_train, n_test_balanced)
     metric_dict['random_all'].append(logfc_correlation(
-        sampled_true_all_without_train[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False))
+        sampled_true_all_without_train[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True))
 
     if include_best:
         true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
@@ -3286,7 +3738,7 @@ def semi_rigorous_nontrivial_logfc_correlation(test_adata, pred_dict, ctrl_adata
         for p in true_s_dict.keys():
             sampled_adata = adata_sample(true_s_dict[p], n_test_balanced)
             corr = logfc_correlation(
-                sampled_adata[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=False)
+                sampled_adata[:,non_trivial].copy(), ctrl_adata[:,non_trivial].copy(), true_logfc_df, 'stimulated', 'ctrl', do_layer_process=True)
             if corr > corr_best:
                 corr_best = corr
         metric_dict['best'].append(corr_best)
@@ -3523,6 +3975,52 @@ def semi_rigorous_Edistance(test_adata, pred_dict, true_s_adata, primary_variabl
         for p in true_s_dict.keys():
             sampled_adata = adata_sample(true_s_dict[p], n_test_balanced)
             metric = compute_Edistance(sampled_adata, test_adata)
+            if metric < metric_best:
+                metric_best = metric
+        metric_dict['best'].append(metric_best)
+
+    # for key in metric_dict:
+    #     metric_dict[key] = list(-np.log10(np.array(metric_dict[key])))
+        
+    return metric_dict
+
+
+def semi_rigorous_c2st_distance(test_adata, pred_dict, true_s_adata, primary_variable, train_adata=None, include_best=False):
+
+    metric_dict = defaultdict(list)
+
+    if train_adata is not None:
+        n_test_balanced = int((test_adata.n_obs + train_adata.n_obs)/2)
+        test_adata = adata_sample(test_adata, n_test_balanced)
+        true_s_adata_without_train = true_s_adata[~true_s_adata.obs.index.isin(train_adata.obs.index)].copy()
+        train_adata = adata_sample(train_adata, n_test_balanced)
+        metric_dict['true'].append(c2st_distance(train_adata.X, test_adata.X)[0])
+    else:
+        # metric_dict['true'].append(0)
+        n_test_balanced = int(test_adata.n_obs/2)
+        chosen_index = np.random.choice(test_adata.n_obs, size=1)
+        train_adata = test_adata[chosen_index].copy()
+        train_adata = adata_sample(train_adata, n_test_balanced)
+        test_adata = adata_sample(test_adata, n_test_balanced)
+        metric_dict['true'].append(c2st_distance(train_adata.X, test_adata.X)[0])
+        true_s_adata_without_train = true_s_adata.copy()
+
+    for model in pred_dict.keys():
+        sampled_adata = adata_sample(pred_dict[model], n_test_balanced)
+        metric_dict[model].append(c2st_distance(sampled_adata.X, test_adata.X)[0])
+    
+    sampled_true_all = adata_sample(true_s_adata, n_test_balanced)
+    metric_dict['random_all+seen_true'].append(c2st_distance(sampled_true_all.X, test_adata.X)[0])
+
+    sampled_true_all_without_train = adata_sample(true_s_adata_without_train, n_test_balanced)
+    metric_dict['random_all'].append(c2st_distance(sampled_true_all_without_train.X, test_adata.X)[0])
+
+    if include_best:
+        true_s_dict = split_adata_by_primary(true_s_adata, primary_variable)
+        metric_best = 1
+        for p in true_s_dict.keys():
+            sampled_adata = adata_sample(true_s_dict[p], n_test_balanced)
+            metric = c2st_distance(sampled_adata.X, test_adata.X)[0]
             if metric < metric_best:
                 metric_best = metric
         metric_dict['best'].append(metric_best)
@@ -3900,3 +4398,40 @@ def loess(x, y, frac=0.2):
     smoothed = sm.nonparametric.lowess(y, x, frac=frac)  
     x_smooth, y_smooth = smoothed[:,0], smoothed[:,1]
     return x_smooth, y_smooth
+
+
+def calculate_k_local_metric(target_adata, metric_name, seed=42):
+    state = np.random.get_state()
+
+    try:
+        np.random.seed(seed)
+
+        n_repeats = 10
+        k_values = np.arange(1, int(target_adata.X.shape[0]/2), 2)
+        print(f"true adata size: {target_adata.X.shape[0]}")
+    
+        metric_dict = {}
+        delta_2_std_list = []
+
+        for k in k_values:
+            print(f"for k={k}")
+            if metric_name == 'local_mmd':
+                metric_dict[k] = noise_effect_local_mmd(target_adata, None, n_repeats=n_repeats, percent_interval=100, 
+                                                        method='shuffle', mode='not_nested', k=k)
+            elif metric_name == 'local_Edistance':
+                metric_dict[k] = noise_effect_local_Edistance(target_adata, None, n_repeats=n_repeats, percent_interval=100, 
+                                                              method='shuffle', mode='not_nested', k=k)
+            else:
+                raise ValueError("add the 'elif' block for the corresponding local metric here!!  :)")
+            delta_2_std_list.append(compute_delta_over_std(metric_dict[k]))
+
+        x_smooth, y_smooth = loess(k_values, delta_2_std_list)
+        max_idx = np.argmax(y_smooth)
+        x_peak = x_smooth[max_idx]
+
+        return x_peak
+    finally:
+        # Restore the state exactly as it was before entering the function
+        np.random.set_state(state)
+    
+        
