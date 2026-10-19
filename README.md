@@ -103,7 +103,7 @@ python prediction.py \
 ## Evaluation
 
 The evaluation step uses the **CrossSplit framework** to systematically assess model performance across different evaluation metrics.
-The pipeline also includes **custom evaluation functions** designed to examine and analyze specific evaluation metrics (e.g. noise_effect_mixing_index)
+The pipeline also includes **custom evaluation functions** designed to examine and analyze specific evaluation metrics (e.g. noise_effect_mixing_index_louvain)
 
 Example evaluation command:
 
@@ -114,7 +114,7 @@ python evaluation.py \
   --config_path ./configs \
   --base_path ../outputs \
   --setting ood \
-  --evaluation_metric rigorous_wasserstein rigorous_mixing_index_seurat
+  --evaluation_metric rigorous_wasserstein rigorous_mixing_index_louvain
 ```
 
 ---
