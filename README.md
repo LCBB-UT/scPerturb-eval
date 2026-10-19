@@ -116,9 +116,10 @@ python evaluation.py \
   --setting ood \
   --evaluation_metric rigorous_wasserstein rigorous_mixing_index_louvain
 ```
-
----
+ 
 ## Manuscript
+
+The manuscript preprint is available at: https://www.biorxiv.org/content/10.64898/2026.02.14.705879v1
 
 ## Contributors
 lcbb.ut.ac.ir
