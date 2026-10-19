@@ -119,7 +119,9 @@ python evaluation.py \
  
 ## Manuscript
 
-The manuscript preprint is available at: https://www.biorxiv.org/content/10.64898/2026.02.14.705879v1
-
+The manuscript preprint is available as [Evaluating Single-Cell Perturbation Response Models Is Far from Straightforward](https://www.biorxiv.org/content/10.64898/2026.02.14.705879v1)
+```
 ## Contributors
-lcbb.ut.ac.ir
+
+- [Hesam Montazeri](lcbb.ut.ac.ir)
+- 
