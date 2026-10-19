@@ -14,7 +14,7 @@ The pipeline consists of three main steps:
 Clone the repository using:
 
 ```bash
-git clone https://github.com/scPerturbationStudies/scPerturb-eval.git
+git clone https://github.com/LCBB-UT/scPerturb-eval.git
 cd scPerturb-eval/scproj
 ```
 
@@ -26,7 +26,13 @@ The pipeline is driven by configuration files that define both datasets and mode
 
 ### Dataset configuration
 
-Each single cell perturbation dataset is associated with a configuration file that specifies the **modality**, defined as the variable whose perturbation effect is to be predicted (e.g.  IFN-β stimulation), as well as the **primary**, which corresponds to the target cell type for which the perturbation effect is evaluated.
+Each single-cell perturbation dataset should have an associated configuration file defining the variables and conditions used for perturbation-effect prediction:
+
+- **`primary_variable`**: The name of the `adata.obs` column that identifies cell types or cell lines (covariates).
+- **`modality_variable`**: The name of the `adata.obs` column that identifies the perturbation state of each cell (e.g., `condition`).
+- **`control_key`**: The value in `modality_variable` corresponding to the unperturbed control condition (e.g., `ctrl`).
+- **`ood_primary`**: The target cell type or cell line for which the perturbation effect is to be predicted.
+- **`ood_modality`**: The target perturbation, specified as a value in `modality_variable`, whose effect is to be predicted on `ood_primary`.
 
 ### Model configuration
 
