@@ -43,13 +43,18 @@ Model configuration files define the model architecture, the associated hyperpar
 ## Data handling
 
 Processed single cell perturbation datasets should be placed in the `../inputs/datasets/` directory, with each dataset stored in its own subdirectory. For each dataset, a corresponding configuration file must be created in `./configs/data/`, using the same name as the dataset subdirectory. 
-**Data format**: The framework assumes that `adata.X` contains raw count data, consistent with the data typically stored in `adata.layers['counts']` in an AnnData object.
+**Data format**: The framework assumes that `adata.X` contains count data, consistent with the data typically stored in `adata.layers['counts']` in an AnnData object.
 
 ### Data availability
 
-The datasets used in our paper are publicly available. 
-For the Kang dataset, we used the preprocessed data provided by Lotfollahi et al., available on [Google Drive](https://drive.google.com/drive/u/0/folders/1yFB0gBr72_KLLp1asojxTgTqgz6cwpju).
+The datasets used in our paper are publicly available:
 
+- **Kang:** We used the preprocessed data provided by Lotfollahi et al., available on [Google Drive](https://drive.google.com/drive/u/0/folders/1yFB0gBr72_KLLp1asojxTgTqgz6cwpju). We downloaded `kang_normalized_hvg.h5ad` and placed it in the `kang/` subdirectory of `../inputs/datasets/`. To ensure compatibility with the framework, we copied the `adata.layers['counts']` to `adata.X`.
+
+- **Datlinger:**, we obtained the count data from GEO under accession [GSM5151370](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM5151370). The downloaded H5AD and CSV feature files were placed in `../inputs/datasets/datlinger/rawData/DatlingerBock/`. We then preprocessed the data by retaining cells with at least 100 counts, genes expressed in a minimum of five cells, and the 5,000 highly variable genes (HVGs). The preprocessing script is available at `./data_preprocessing/prepare_datlinger.py`.
+
+- **SciPlex3 dataset:** We downloaded the dataset available via scPerturb at [Zenodo](https://doi.org/10.5281/zenodo.13350497). The data were preprocessed using `./data_preprocessing/prepare_sciplex3.py`.
+  
 ---
 
 ## Training
