@@ -42,7 +42,13 @@ Model configuration files define the model architecture, the associated hyperpar
 
 ## Data handling
 
-Processed single cell perturbation datasets should be placed in the `../inputs/datasets/` directory, with each dataset stored in its own subdirectory. For each dataset, a corresponding configuration file must be created in `./configs/data/`, using the same name as the dataset subdirectory.
+Processed single cell perturbation datasets should be placed in the `../inputs/datasets/` directory, with each dataset stored in its own subdirectory. For each dataset, a corresponding configuration file must be created in `./configs/data/`, using the same name as the dataset subdirectory. 
+**Data format**: The framework assumes that `adata.X` contains raw count data, consistent with the data typically stored in `adata.layers['counts']` in an AnnData object.
+
+### Data availability
+
+The datasets used in our paper are publicly available. 
+For the Kang dataset, we used the preprocessed data provided by Lotfollahi et al., available on [Google Drive](https://drive.google.com/drive/u/0/folders/1yFB0gBr72_KLLp1asojxTgTqgz6cwpju).
 
 ---
 
