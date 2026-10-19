@@ -40,9 +40,9 @@ Model configuration files define the model architecture, the associated hyperpar
 
 ---
 
-## Data Availability
+## Data handling
 
-Processed single cell perturbation datasets can be added to the `datsets` folder. For each dataset, a corresponding configuration file should be created and placed in the `./configs/data` folder.
+Processed single cell perturbation datasets should be placed in the `../inputs/datasets/` directory, with each dataset stored in its own subdirectory. For each dataset, a corresponding configuration file must be created in `./configs/data/`, using the same name as the dataset subdirectory.
 
 ---
 
