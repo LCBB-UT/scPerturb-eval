@@ -49,11 +49,11 @@ Processed single cell perturbation datasets should be placed in the `../inputs/d
 
 The datasets used in our paper are publicly available:
 
-- **Kang:** We used the preprocessed data provided by [Lotfollahi et al.](https://pubmed.ncbi.nlm.nih.gov/37154091/), available on [Google Drive](https://drive.google.com/drive/u/0/folders/1yFB0gBr72_KLLp1asojxTgTqgz6cwpju). We downloaded `kang_normalized_hvg.h5ad` and placed it in the `kang/` subdirectory of `../inputs/datasets/`. To ensure compatibility with the framework, we copied the `adata.layers['counts']` to `adata.X`.
+- **Kang:** We used the preprocessed data provided by [Lotfollahi et al.](https://link.springer.com/article/10.15252/msb.202211517), available on [Google Drive](https://drive.google.com/drive/u/0/folders/1yFB0gBr72_KLLp1asojxTgTqgz6cwpju). We downloaded `kang_normalized_hvg.h5ad` and placed it in the `kang/` subdirectory of `../inputs/datasets/`. To ensure compatibility with the framework, we copied the `adata.layers['counts']` to `adata.X`.
 
 - **Datlinger:** We obtained the count data from GEO under accession [GSM5151370](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM5151370). The downloaded H5AD and CSV feature files were placed in `../inputs/datasets/datlinger/rawData/DatlingerBock/`. We then preprocessed the data by retaining cells with at least 100 counts, genes expressed in a minimum of five cells, and the 5,000 highly variable genes (HVGs). The preprocessing script is available at `./data_preprocessing/prepare_datlinger.py`.
 
-- **SciPlex3 dataset:** We downloaded the dataset available via scPerturb at [Zenodo](https://doi.org/10.5281/zenodo.13350497). The data were preprocessed using `./data_preprocessing/prepare_sciplex3.py`.
+- **SciPlex3 dataset:** We downloaded the dataset available via [scPerturb](https://www.nature.com/articles/s41592-023-02144-y) at [Zenodo](https://doi.org/10.5281/zenodo.13350497). The data were preprocessed using `./data_preprocessing/prepare_sciplex3.py`.
   
 ---
 
