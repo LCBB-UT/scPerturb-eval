@@ -1,9 +1,9 @@
 import os
 import numpy as np
 import pandas as pd
-from utils.common import calculate_cpm, seurat_deg
+from utils.common import calculate_cpm
+from utils.assessment import seurat_deg
 from scipy.sparse import issparse
-
 
 def predict_baseline_logfc(train_adata, hyperparams, data_params, setting, ood_primary, ood_modality, path_to_save = '.'):
     if issparse(train_adata.X):

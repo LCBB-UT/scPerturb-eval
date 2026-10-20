@@ -32,10 +32,10 @@ from itertools import combinations
 from statsmodels.stats.multitest import multipletests
 import statsmodels.api as sm
 from scipy.sparse import issparse, csr_matrix
-target_path = os.path.abspath("/home/karimpour/sc_perturb/sc_proj/utils")
-sys.path.append(target_path)
-from common import calculate_cpm
-from helper import TorchMLPClassifier
+# target_path = os.path.abspath("/home/karimpour/sc_perturb/sc_proj/utils")
+# sys.path.append(target_path)
+from .common import calculate_cpm
+from .helper import TorchMLPClassifier
 
 np.random.seed(42)
 # random.seed(42)
@@ -1094,13 +1094,18 @@ def c2st_distance(samples1, samples2, n_splits=5, hidden_layer_sizes=[128, 16], 
     X = np.concatenate([samples1, samples2], axis=0)
     y = np.concatenate([np.zeros(len(samples1)), np.ones(len(samples2))])
 
+    svd_solver = 'auto'
+    ## The need for regularization decreases as the sample size increases
+    if X.shape[0] > sample_threshold_high:
+        alpha = 1e-2
+
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=None)
     scores = []
 
+    ## when sample size is low, set n_pcs such that at least 20% of the total variance in X_train is explained
     if X.shape[0] < sample_threshold_low:
-        n_pcs = 2*alpha
-    if X.shape[0] > sample_threshold_high:
-        alpha = 1e-2
+        n_pcs = 0.2
+        svd_solver = 'full'
 
     for fold, (train_idx, test_idx) in enumerate(cv.split(X, y)):
         X_train, X_test = X[train_idx], X[test_idx]
@@ -1113,10 +1118,11 @@ def c2st_distance(samples1, samples2, n_splits=5, hidden_layer_sizes=[128, 16], 
 
         if do_pca:
             n_components = min(n_pcs, X_train.shape[0], X_train.shape[1])
-            pca = PCA(n_components=n_components, random_state=random_state)
-            # print(f"number of PCA components: {n_components}")
+            pca = PCA(n_components=n_components, svd_solver=svd_solver, random_state=random_state)
             X_train = pca.fit_transform(X_train)
             X_test = pca.transform(X_test)
+            # print(f"Number of PCA components: {pca.n_components_}")
+            # print(f"Total explained variance ratio: {pca.explained_variance_ratio_.sum():.4f}")
 
         if classifier == "mlp":
             clf = TorchMLPClassifier(

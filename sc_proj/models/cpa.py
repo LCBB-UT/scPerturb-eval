@@ -1,11 +1,11 @@
-import cpa
+# import cpa
 import os
 import torch
 from utils.common import calculate_cpm
 import scanpy as sc
 import pandas as pd
 
-def train_CPA(train_adata, hyperparams, data_params, setting, ood_primary, path_to_save='.'):
+def train_CPA(train_adata, hyperparams, data_params, setting, ood_primary, ood_modality, path_to_save='.'):
     
     device = True if torch.cuda.is_available() else False
           

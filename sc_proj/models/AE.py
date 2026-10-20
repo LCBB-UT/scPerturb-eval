@@ -72,7 +72,7 @@ def get_activation(activation):
         raise ValueError(f"Unsupported activation function: {activation}")
 
         
-def train_AE(train_adata, hyperparams, data_params, setting, ood_primary=None, path_to_save='.'):
+def train_AE(train_adata, hyperparams, data_params, setting, ood_primary, ood_modality, path_to_save='.'):
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     

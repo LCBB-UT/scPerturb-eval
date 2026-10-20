@@ -1,0 +1,7 @@
+
+[cli]
+rich
+click
+
+[gui]
+PyQt5

@@ -10,12 +10,14 @@ def preprocess_data(adata, min_counts=500, min_genes=750, mt_frac_threshold=0.2,
     sc.pp.filter_cells(adata, min_counts=min_counts)
     print('Number of cells after min count filter: {:d}'.format(adata.n_obs))
     sc.pp.filter_cells(adata, min_genes=min_genes)
+    # adata = adata[adata.obs.mt_frac < mt_frac_threshold]
+    # print('Total number of genes: {:d}'.format(adata.n_vars))
 
     # Filtering genes based on cell count
     sc.pp.filter_genes(adata, min_cells=min_cells_gene_filter)
     print('Number of genes after cell filter: {:d}'.format(adata.n_vars))
 
-    # Save original counts in the counts layer
+    # Save original counts in a layer
     adata.layers["counts"] = adata.X.copy()
 
     # Normalize and preprocess
@@ -31,13 +33,15 @@ def preprocess_data(adata, min_counts=500, min_genes=750, mt_frac_threshold=0.2,
 
     return adata
 
-adata = sc.read("../../datasets/srivatsan/SrivatsanTrapnell2020_sciplex3.h5ad")
-adata = adata[adata.obs['dose_value'].isin([0, 1000])].copy()
+drug_dose = 1000     ## 100, 1000
+adata = sc.read("/home/karimpour/sc_perturb/inputs/datasets/sciplex3/SrivatsanTrapnell2020_sciplex3.h5ad")
+adata = adata[adata.obs['dose_value'].isin([0, drug_dose])].copy()
 
 filtered_data = preprocess_data(adata, min_counts= 100, min_genes = 5)
 filtered_data.var.index = filtered_data.var['ensembl_id']
 filtered_data = filtered_data[~filtered_data.obs["cell_line"].isna()].copy()
 
 
-output_path = '../../datasets/srivatsan/'
-filtered_data.write(os.path.join(output_path, 'processed_SciPlex3.h5ad'))
+output_path = '/home/karimpour/sc_perturb/inputs/datasets/sciplex3/'
+# filtered_data.write(os.path.join(output_path, 'processed_SciPlex3.h5ad'))
+filtered_data.write(os.path.join(output_path, f'processed_SciPlex3_{drug_dose}.h5ad'))

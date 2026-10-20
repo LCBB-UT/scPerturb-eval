@@ -434,7 +434,8 @@ def plot_pca_conditional(samples, labels, generated_samples, generated_labels, e
 
 
 def lineplot_with_errorbar(results, ood_primary, data, save_folder, xlabel, ylabel, filename, title, 
-    legend_title='Method', y_min=None, y_max=None, x_log_scale=True, figsize=(10, 6), color_indices=None, num_colors=None, model_style=None):
+    legend_title='Method', y_min=None, y_max=None, x_log_scale=True, figsize=(10, 6), color_indices=None, 
+    num_colors=None, model_style=None, palette_name=None):
 
     # setting_name = save_folder.split('/')[-2]
     # styles = {}
@@ -482,11 +483,12 @@ def lineplot_with_errorbar(results, ood_primary, data, save_folder, xlabel, ylab
             styles[model] = 'solid'
 
     # --- Style setup ---
+    palette_name = 'tab10' if palette_name is None else palette_name
     sns.set_theme(style="whitegrid", context="talk", font_scale=1.1)
     if not num_colors:
-        palette = sns.color_palette("tab10", n_colors=len(results))
+        palette = sns.color_palette(palette_name, n_colors=len(results))
     else:
-        palette = sns.color_palette("tab10", n_colors=num_colors)
+        palette = sns.color_palette(palette_name, n_colors=num_colors)
     if color_indices:
         palette = [palette[col] for col in color_indices]
 

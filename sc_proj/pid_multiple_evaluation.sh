@@ -1,18 +1,18 @@
 #!/bin/bash
 
 dataset="datlinger"
-metric="semi_rigorous_Edistance"
+metric="semi_rigorous_c2st_distance"
 
-for pid_percent in 1 10 20 30 40 50
+for i in {1..5}
 do
-  pid_ratio=$(printf "%.2f" "$(echo "$pid_percent / 100" | bc -l)")
 
-  for i in {1..5}
+  for pid_percent in 1 10 20 30 40 50
   do
+    pid_ratio=$(printf "%.2f" "$(echo "$pid_percent / 100" | bc -l)")
     echo "Running $dataset with pid_percent=$pid_percent (pid_ratio=$pid_ratio), run $i"
     
     python evaluation.py \
-      --models noperturb cae cpa scPRAM \
+      --models noperturb cae cpa scPRAM scGPT trVAE_tf scVIDR \
       --datasets ${dataset} \
       --config_path ./configs \
       --base_path ../outputs \

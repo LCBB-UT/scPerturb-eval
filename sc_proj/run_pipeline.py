@@ -15,22 +15,27 @@ from models.VAE_KNN_logFC import train_VAE_KNN_logFC, predict_VAE_KNN_logFC
 from models.VAE import train_VAE, predict_VAE, generate_from_VAE
 from models.cpa import train_CPA, predict_CPA
 from models.scPRAM import train_scPRAM, predict_scPRAM
+from models.scGPT import train_scGPT, predict_scGPT
+from models.Squidiff import train_Squidiff, predict_Squidiff
+from models.scVIDR import train_scVIDR, predict_scVIDR
+from models.trVAE import train_trVAE, predict_trVAE
+from models.trVAE_tf import train_trVAE_tf, predict_trVAE_tf
 from models.clip_ae import train_CLIP_AE, predict_CLIP_AE
 from models.clip_ae_res import train_CLIP_AE_RES, predict_CLIP_AE_RES
+from models.clip_ae_bimodel import train_CLIP_AE_BIMODEL, predict_CLIP_AE_BIMODEL
 from models.noperturb import predict_noperturb
 from models.random_all import predict_random_all
 from models.baseline_logfc import predict_baseline_logfc
 from models.baseline_logfc_modified import predict_baseline_logfc_modified
 from models.baseline_logfc_all import predict_baseline_logfc_all
-# from models.scGPT import train_scGPT
-from utils.build_params import ae, cae, cvae_knn, cvae_knn_deg, cvae_deg, cvae_knn_logfc, clip_cae, cpa, scPRAM, scGPT,\
-    noperturb, random_all, baseline_logfc, baseline_logfc_all, baseline_self_logfc, baseline_logfc_modified,\
-    build_data_params, vae
+from utils.build_params import ae, cae, cvae_knn, cvae_knn_deg, cvae_deg, cvae_knn_logfc, clip_cae, clip_cae_insf, clip_ae_bimodel, cpa,\
+    scPRAM, scGPT, scGPT_pretrained, Squidiff, scVIDR, trVAE, trVAE_tf, noperturb, random_all, baseline_logfc, baseline_logfc_all, baseline_self_logfc, \
+    baseline_logfc_modified, build_data_params, vae
 from utils.data_handler import prepare_train_data
 from utils.common import calculate_cpm, get_impute_data
 from utils.assessment import true_deg_pos, spearman_corr, spearman_corr_per_gene, prediction_error, wasserstein, corr_top_k,\
     process_subtract_control, sorted_pvalue_common_genes, sorted_pvalue_rank, combined_deg, combined_deg_basemodel,\
-    corr_top_k_per_primary, subtract_control, k_nearest_neighbors, mixing_index, seurat_deg, mixing_index_seurat,\
+    corr_top_k_per_primary, subtract_control, k_nearest_neighbors, mixing_index, seurat_deg,\
     combined_deg_seurat, z_correlation
 import utils.assessment as assess
 import utils.plots as plots
@@ -38,57 +43,57 @@ from utils.plots import correlation_barplot, true_pos_lineplot, draw_boxplot, to
 
 
 def train(models, datasets, model_config_path, data_config_path, save_folder, setting, pid_percentage):
-        config_model = configparser.ConfigParser()            
-        config_data = configparser.ConfigParser()
+    config_model = configparser.ConfigParser()            
+    config_data = configparser.ConfigParser()
+    
+    for data in datasets:
+        config_data_path = os.path.join(data_config_path, f'{data}.ini')
+        config_data.read(config_data_path)
+        data_params = build_data_params(config_data)
+
+        ######################## create and save imputated adata ################################################
+        # adata = get_impute_data(
+        #     data, data_params['primary_variable'], data_params['modality_variable'], data_params["data"], 'scRecover')
         
-        for data in datasets:
-            config_data_path = os.path.join(data_config_path, f'{data}.ini')
-            config_data.read(config_data_path)
-            data_params = build_data_params(config_data)
+        # if adata is None:
+        #     raise ValueError('ERROR: the imputated data cannot be found or obtained!')
 
-            ######################## create and save imputated adata ################################################
-            # adata = get_impute_data(
-            #     data, data_params['primary_variable'], data_params['modality_variable'], data_params["data"], 'scRecover')
-            
-            # if adata is None:
-            #     raise ValueError('ERROR: the imputated data cannot be found or obtained!')
+        #########################################################################################################
 
-            #########################################################################################################
-
-            adata = sc.read(data_params["data"])
-                       
-            for model in models:
-                
-                config_model_path = os.path.join(model_config_path, f'{model}.ini')
-                config_model.read(config_model_path)
-                
-                build_config_func = globals()[model]
-                hyperparams = build_config_func(config_model)
-                
-                if 'train_func' in hyperparams:
-                    train_func = globals().get(hyperparams['train_func'])
-                else:
-                    raise ValueError("ERROR: train_func must be specified in the model config!")
-
-                path_to_save = os.path.join(data_params['base_path'], 'train_predict', data, model, save_folder)                
-                os.makedirs(path_to_save, exist_ok=True)
-
-                # Copy the config files to the save directory
-                shutil.copy(config_data_path, path_to_save)
-                shutil.copy(config_model_path, path_to_save)
-               
-                for ood_primary in data_params["ood_primaries"]:
-                    for ood_modality in data_params["ood_modality"]:
-                        print(f"training {ood_primary}-{ood_modality}")
+        adata = sc.read(data_params["data"])
                     
-                        cond_model_path = os.path.join(path_to_save, 'models', f"{ood_primary}-{ood_modality}")
-                        os.makedirs(cond_model_path, exist_ok=True)
-                        
-                        train_adata = prepare_train_data(adata, data_params['primary_variable'], data_params['modality_variable'], data_params['control_key'],  
-                                                                            ood_primary, ood_modality, cond_model_path, setting, pid_percentage)
-                        
-                        # TRAINING
-                        train_func(train_adata, hyperparams, data_params, setting, ood_primary, path_to_save=cond_model_path)
+        for model in models:
+            
+            config_model_path = os.path.join(model_config_path, f'{model}.ini')
+            config_model.read(config_model_path)
+            
+            build_config_func = globals()[model]
+            hyperparams = build_config_func(config_model)
+            
+            if 'train_func' in hyperparams:
+                train_func = globals().get(hyperparams['train_func'])
+            else:
+                raise ValueError("ERROR: train_func must be specified in the model config!")
+
+            path_to_save = os.path.join(data_params['base_path'], 'train_predict', data, model, save_folder)                
+            os.makedirs(path_to_save, exist_ok=True)
+
+            # Copy the config files to the save directory
+            shutil.copy(config_data_path, path_to_save)
+            shutil.copy(config_model_path, path_to_save)
+            
+            for ood_primary in data_params["ood_primaries"]:
+                for ood_modality in data_params["ood_modality"]:
+                    print(f"training {ood_primary}-{ood_modality}")
+                
+                    cond_model_path = os.path.join(path_to_save, 'models', f"{ood_primary}-{ood_modality}")
+                    os.makedirs(cond_model_path, exist_ok=True)
+                    
+                    train_adata = prepare_train_data(adata, data_params['primary_variable'], data_params['modality_variable'], data_params['control_key'],  
+                                                                        ood_primary, ood_modality, cond_model_path, setting, pid_percentage)
+                    
+                    # TRAINING
+                    train_func(train_adata, hyperparams, data_params, setting, ood_primary, ood_modality=ood_modality, path_to_save=cond_model_path)
                 
             
 def predict(models, datasets, model_config_path, data_config_path, save_folder, setting, pid_percentage):
@@ -137,7 +142,7 @@ def predict(models, datasets, model_config_path, data_config_path, save_folder, 
 
 
 
-def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_metrics, save_folder, pid_percentage):
+def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_metrics, save_folder, pid_percentage, do_hvg, hvg_size):
       
     config_data = configparser.ConfigParser()
     
@@ -161,14 +166,66 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
             
             adata = sc.read(data_params["data"]) 
 
+            # save/load train-test split indices:
+            n_split = 10
+            # splitted_folder = f"{'/'.join(data_params['data'].split('/')[:-2])}/splitted_dataset"
+            splitted_folder = "../inputs/splitted_dataset"
+            os.makedirs(splitted_folder, exist_ok=True)
+            splitted_dataset_file = os.path.join(splitted_folder, f"{data}_splitted.h5ad")
+            if os.path.isfile(splitted_dataset_file):
+                adata = sc.read(splitted_dataset_file)
+            else:
+                modalities = adata.obs[data_params['modality_variable']].unique()
+                non_control_modalities = [m for m in modalities if m!=data_params['control_key']]
+                for i in range(n_split):
+                    rng = np.random.default_rng(42+i)
+                    split_label = f"split_{i}"
+                    adata.obs[split_label] = data_params['control_key']
+                    for ncm in non_control_modalities:
+                        stimulated_mask = adata.obs[data_params['modality_variable']] == ncm
+                        for cell_type in adata.obs[data_params['primary_variable']].unique():
+                            mask = stimulated_mask & (adata.obs[data_params['primary_variable']] == cell_type)
+                            indices = np.where(mask)[0]
+                            if len(indices) == 0:
+                                continue
+                            # np.random.shuffle(indices) 
+                            rng.shuffle(indices)
+                            split_idx = int(0.5 * len(indices))
+                            train_idx, test_idx = indices[:split_idx], indices[split_idx:]
+                            # adata.obs.iloc[train_idx, adata.obs.columns.get_loc(split_label)] = "train"
+                            adata.obs.loc[adata.obs.index[train_idx], split_label] = "train"
+                            # adata.obs.iloc[test_idx, adata.obs.columns.get_loc(split_label)] = "test"
+                            adata.obs.loc[adata.obs.index[test_idx], split_label] = "test"
+                adata.write_h5ad(splitted_dataset_file)
+
             if not issparse(adata.X):
                 adata = calculate_cpm(adata, do_sparse=False)
             else:
                 adata = calculate_cpm(adata, do_sparse=True)
             #########################################################
+            #########################################################
             # to be deleted -> evaluation on low dimension
             # gene_subset = np.load(data_params['gene_subset'])
-            # adata = adata[:, gene_subset].copy()
+            if do_hvg:
+                gene_size = hvg_size
+                print(f"Evaluation on {gene_size} highly variable genes")
+                hvg_path = f"{'/'.join(data_params['data'].split('/')[:-1])}/hvg_{gene_size}.npy"
+                if os.path.isfile(hvg_path):
+                    hvg = np.load(hvg_path, allow_pickle=True)
+                    print(f"loading {gene_size} HVGs")
+                else:
+                    # adata_copy = adata.copy()
+                    sc.pp.highly_variable_genes(adata, flavor='seurat', n_top_genes=gene_size, subset=False)
+                    hvg = adata.var_names[adata.var["highly_variable"]].to_numpy()
+                    # ind_all =[]
+                    # for i in adata.var_names:
+                    #     ind_all.append(np.where(adata_copy.var_names==i)[0][0])
+                    # hvg = np.array(ind_all)
+                    np.save(hvg_path, hvg)
+                    print(f"saving {gene_size} HVGs")
+                adata = adata[:, hvg].copy()
+                # adata = adata[:, gene_subset].copy()
+            #########################################################  
             #########################################################  
             
             for ood_modality in data_params['ood_modality']:
@@ -177,7 +234,7 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                 
                 all_corr = []
                 logfc_corr = []
-                mixing_seurat = []
+                mixing_louvain = []
                 results_down = {}
                 results_up = {}
                 per_gene_true = []
@@ -220,13 +277,6 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                     continue
                 
                 for ood_primary in data_params["ood_primaries"]:
-                    ################## delete later #####################
-                    # ['B', 'CD14 Mono', 'CD16 Mono', 'CD4 T', 'CD8 T', 'DC', 'NK', 'T']
-                    # if ood_primary not in ['CD4 T', 'B', 'DC']:
-                    #     continue
-                    # if ood_primary != 'NK':
-                    #     continue
-                    ################## delete later #####################
         
                     true_adata =  ood_modality_adata[(ood_modality_adata.obs[data_params['primary_variable']] == ood_primary) & 
                                                 (ood_modality_adata.obs[data_params['modality_variable']] == ood_modality)].copy()
@@ -240,6 +290,30 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                     true_except_ood = ood_modality_adata[(ood_modality_adata.obs[data_params['primary_variable']] != ood_primary) & 
                                                 (ood_modality_adata.obs[data_params['modality_variable']] == ood_modality)].copy()
 
+                    ######### determine k for local metrics
+                    if 'local' in evaluation_metric:
+                        if 'local_mmd' in evaluation_metric:
+                            suffix = 'local_mmd' 
+                        elif 'local_Edistance' in evaluation_metric:
+                            suffix = 'local_Edistance'
+                        else:
+                            raise ValueError("add the 'elif' block for the corresponding local metric here!!  :)") 
+                        folder_to_look = os.path.join(f'../outputs/dependencies', data, ood_modality)
+                        os.makedirs(folder_to_look, exist_ok=True)
+                        hvg_suffix = f'_{gene_size}' if do_hvg else ''
+                        path_to_look = os.path.join(folder_to_look, f'k_{suffix}{hvg_suffix}.pkl')
+                        if os.path.isfile(path_to_look):
+                            with open(path_to_look, 'rb') as f:
+                                k_dict = pickle.load(f)
+                        else:
+                            k_dict = {}
+                        if ood_primary not in k_dict:
+                            print(f"\ncalculating optimal k for {ood_primary} for metric {suffix}\n")
+                            k_dict[ood_primary] = assess.calculate_k_local_metric(true_adata.copy(), suffix)
+                            with open(path_to_look, 'wb') as f:
+                                pickle.dump(k_dict, f)
+
+                    ###########################
                     ood_indices_test = None
 
                     if setting == 'pid':
@@ -290,9 +364,17 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         pred_adata = sc.read(os.path.join(cond_pred_path, 'pred_adata.h5ad'))
 
                         #########################################################
+                        #########################################################
                         # to be deleted -> evaluation on low dimension
                         # if pred_adata.n_vars > len(gene_subset):
                         #     pred_adata = pred_adata[:, gene_subset].copy()
+                        if do_hvg:    
+                            if not pred_adata.n_vars < hvg_size :
+                                pred_adata = pred_adata[:, hvg].copy()
+                            else:
+                                raise ValueError(f"some genes are missing from prediction AnnData")
+                            
+                        #########################################################
                         #########################################################
         
                         pred_dict[model] = pred_adata.copy()
@@ -362,10 +444,10 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         elif evaluation_metric == 'corr_top_k':
                             results_gsea[model] = corr_top_k(modality_adata, np.mean(pred_adata.X, axis=0), data_params['primary_variable'], ood_primary)
         
-                        elif evaluation_metric == 'normalized_corr_top_k':
-                            results_gsea[model] = corr_top_k(
-                                modality_adata_normalized, np.mean(pred_adata.X, axis=0)-control_mean_dict[ood_primary], 
-                                data_params['primary_variable'], ood_primary)
+                        # elif evaluation_metric == 'normalized_corr_top_k':
+                        #     results_gsea[model] = corr_top_k(
+                        #         modality_adata_normalized, np.mean(pred_adata.X, axis=0)-control_mean_dict[ood_primary], 
+                        #         data_params['primary_variable'], ood_primary)
                         
                         elif evaluation_metric == 'corr_top_k_per_primary':
                             results_down[model], results_up[model], base_ratio = corr_top_k_per_primary(pred_adata, true_adata, ctrl_adata)
@@ -376,15 +458,15 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                                 mixing_list.append(mixing_index(pred_adata.copy(), true_adata.copy(), n_clusters=k))
                             mixing_dict[model] = pd.DataFrame({'n': np.arange(1,11), 'true_positives': mixing_list})
         
-                        elif evaluation_metric == 'mixing_index_seurat':
-                            mixing_seurat.append(mixing_index_seurat(pred_adata.copy(), true_adata.copy(), all_data=ood_modality_adata.copy()))
+                        elif evaluation_metric == 'mixing_index_louvain':
+                            mixing_louvain.append(assess.mixing_index_louvain(pred_adata.copy(), true_adata.copy(), all_adata=ood_modality_adata.copy()))
         
-                        elif evaluation_metric == 'mixing_index_seurat_topdeg':
+                        elif evaluation_metric == 'mixing_index_louvain_topdeg':
                             if true_logfc_df is None:
                                 true_logfc_df = seurat_deg(
                                     ctrl_true_adata, data_params['modality_variable'], ood_modality, data_params['control_key'], test_use='MAST', find_variable_features=True)
                                 true_logfc_df = true_logfc_df.sort_values(by="p_val_adj", ascending=True)
-                            mixing_seurat.append(assess.mixing_index_seurat_topdeg(pred_adata.copy(), true_adata.copy(), true_logfc_df, num_top_deg=100))
+                            mixing_louvain.append(assess.mixing_index_louvain_topdeg(pred_adata.copy(), true_adata.copy(), true_logfc_df, num_top_deg=100, all_adata=ood_modality_adata.copy()))
 
                         elif evaluation_metric == 'mixing_index_kmeans_topdeg':
                             if true_logfc_df is None:
@@ -453,22 +535,23 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         true_pos_lineplot(mixing_dict, ood_primary, 'mixing-index', data, path_to_save, 
                                         "number of clusters", "weighted mixing index")
         
-                    elif evaluation_metric == 'rigorous_mixing_index_seurat':
-                        max_size = 15000
+                    elif evaluation_metric == 'rigorous_mixing_index_louvain':
+                        resolution = 2.0
+                        max_size = 5000
                         if ood_modality_adata.n_obs > max_size: 
                             chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
                             all_adata = ood_modality_adata[chosen_indices].copy()
                         else:
                             all_adata = ood_modality_adata.copy()
-                        mixing_index_dict = assess.rigorous_mixing_index_seurat(true_adata, pred_dict, true_except_ood, data_params, ood_primary, ood_modality, all_adata=all_adata)
-                        draw_boxplot(
-                            mixing_index_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
+                        mixing_index_dict = assess.rigorous_mixing_index_louvain(true_adata, pred_dict, true_except_ood, data_params, all_adata=all_adata, resolution=resolution)
                         with open(f'{path_to_save}/mixing_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(mixing_index_dict, f)
+                        draw_boxplot(
+                            mixing_index_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
 
-                    elif evaluation_metric == 'semi_rigorous_mixing_index_seurat':
+                    elif evaluation_metric == 'semi_rigorous_mixing_index_louvain':
                         resolution = 2.0
-                        max_size = 15000
+                        max_size = 5000
                         if ood_modality_adata.n_obs > max_size: 
                             chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
                             all_adata = ood_modality_adata[chosen_indices].copy()
@@ -480,35 +563,42 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             train_adata = train_adata[~train_adata.obs.index.isin(ood_indices_test)].copy()
                         else:
                             train_adata = None
-                        mixing_index_dict = assess.semi_rigorous_mixing_index_seurat(
+                        mixing_index_dict = assess.semi_rigorous_mixing_index_louvain(
                             true_adata, pred_dict, true_except_ood, data_params['primary_variable'], all_adata=all_adata, train_adata=train_adata, resolution=resolution)
                         with open(f'{path_to_save}/mixing_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(mixing_index_dict, f)
                         draw_boxplot(
                             mixing_index_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}", title=f'resolution = {resolution}')
 
-                    elif evaluation_metric == 'rigorous_mixing_index_seurat_topdeg':
+                    elif evaluation_metric == 'rigorous_mixing_index_louvain_topdeg':
                         num_top_deg=10
+
+                        max_size = 5000
+                        if ood_modality_adata.n_obs > max_size: 
+                            chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
+                            all_adata = ood_modality_adata[chosen_indices].copy()
+                        else:
+                            all_adata = ood_modality_adata.copy()
                         if true_logfc_df is None:
                                 true_logfc_df = seurat_deg(
                                     ctrl_true_adata, data_params['modality_variable'], ood_modality, data_params['control_key'], test_use='MAST', find_variable_features=True)
                                 true_logfc_df = true_logfc_df.sort_values(by="p_val_adj", ascending=True)
-                        mixing_index_dict = assess.rigorous_mixing_index_seurat_topdeg(true_adata, pred_dict, true_except_ood, data_params['primary_variable'], true_logfc_df, num_top_deg=num_top_deg)
+                        mixing_index_dict = assess.rigorous_mixing_index_louvain_topdeg(true_adata, pred_dict, true_except_ood, data_params['primary_variable'], true_logfc_df, num_top_deg=num_top_deg, all_adata=all_adata)
                         final_path_to_save = f"{path_to_save}_{num_top_deg}"
                         os.makedirs(final_path_to_save, exist_ok=True)
-                        draw_boxplot(
-                            # mixing_index_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}", f"setting {setting}, top {num_top_deg} genes")
-                            mixing_index_dict, data, final_path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}", f"setting {setting}, top {num_top_deg} genes")
                         # with open(f'{path_to_save}/mixing_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                         with open(f'{final_path_to_save}/mixing_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(mixing_index_dict, f)
+                        draw_boxplot(
+                            # mixing_index_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}", f"setting {setting}, top {num_top_deg} genes")
+                            mixing_index_dict, data, final_path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}", f"setting {setting}, top {num_top_deg} genes")
 
                     elif evaluation_metric == 'rigorous_mixing_index_kmeans':
                         mixing_index_dict = assess.rigorous_mixing_index_kmeans(true_adata, pred_dict, true_except_ood, data_params['primary_variable'])
-                        draw_boxplot(
-                            mixing_index_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
                         with open(f'{path_to_save}/mixing_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(mixing_index_dict, f)
+                        draw_boxplot(
+                            mixing_index_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
 
                     elif evaluation_metric == 'rigorous_mixing_index_kmeans_topdeg':
                         num_top_deg=10
@@ -519,10 +609,10 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         mixing_index_dict = assess.rigorous_mixing_index_kmeans_topdeg(true_adata, pred_dict, true_except_ood, data_params['primary_variable'], true_logfc_df, num_top_deg=num_top_deg)
                         final_path_to_save = f"{path_to_save}_{num_top_deg}"
                         os.makedirs(final_path_to_save, exist_ok=True)
-                        draw_boxplot(
-                            mixing_index_dict, data, final_path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}", f"setting {setting}, top {num_top_deg} genes")
                         with open(f'{final_path_to_save}/mixing_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(mixing_index_dict, f)
+                        draw_boxplot(
+                            mixing_index_dict, data, final_path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}", f"setting {setting}, top {num_top_deg} genes")
 
                     elif evaluation_metric == 'mixing_kmeans_vs_topgenes':
                         all_results = {}  # {method_name: {num_top_genes: [list of 10 values]}}
@@ -964,14 +1054,18 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         draw_boxplot(
                             r2_dict, data, path_to_save, f"r2_{ood_primary}_{ood_modality}")
 
-                    elif evaluation_metric == 'rigorous_normalized_r2_brbic':
-                        modality_adata = ood_modality_adata[ood_modality_adata.obs[data_params['modality_variable']] == ood_modality].copy()
-                        primaries_modality = modality_adata.obs[data_params['primary_variable']].unique()
+                    # pearson_delta_brbic
+                    elif evaluation_metric == 'rigorous_pearson_delta_pert':
+
+                        true_except_ood_norm = true_except_ood.copy()
+                        if issparse(true_except_ood_norm.X):
+                            true_except_ood_norm.X = true_except_ood_norm.X.toarray()
+
+                        primaries_modality = true_except_ood_norm.obs[data_params['primary_variable']].unique()
                         mean_list = []
                         for p in primaries_modality:
-                            adata_primary = modality_adata[modality_adata.obs[data_params['primary_variable']] == p].copy()
-                            X = adata_primary.X.toarray() if issparse(adata_primary.X) else adata_primary.X
-                            mean_list.append(np.mean(X, axis=0))
+                            adata_primary = true_except_ood_norm[true_except_ood_norm.obs[data_params['primary_variable']] == p].copy()
+                            mean_list.append(np.mean(adata_primary.X, axis=0))
                         mean_stack = np.vstack(mean_list)
                         c = np.mean(mean_stack, axis=0).reshape(1,-1)
                         print(f'shape of means: {c.shape}')
@@ -984,13 +1078,7 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         # c_std = c_std[nonzero_all]
                         # print(f'number of nonzero genes: {len(c)}')
 
-                        true_except_ood = ood_modality_adata[(ood_modality_adata.obs[data_params['primary_variable']] != ood_primary) & 
-                                                (ood_modality_adata.obs[data_params['modality_variable']] == ood_modality)].copy()
-                        
                         # true_except_ood_norm = true_except_ood[:, nonzero_all].copy()
-                        true_except_ood_norm = true_except_ood.copy()
-                        if issparse(true_except_ood_norm.X):
-                            true_except_ood_norm.X = true_except_ood_norm.X.toarray()
                         # true_except_ood_norm.X  = (true_except_ood_norm.X - c) / c_std
                         true_except_ood_norm.X  = true_except_ood_norm.X - c
 
@@ -1015,9 +1103,9 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         with open(f'{path_to_save}/r2_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(r2_dict, f)
                         draw_boxplot(
-                            correlation_dict, data, path_to_save, f"pearson_corr_{ood_primary}_{ood_modality}")
+                            correlation_dict, data, path_to_save, f"pearson_delta_pert_{ood_primary}_{ood_modality}")
                         draw_boxplot(
-                            r2_dict, data, path_to_save, f"r2_{ood_primary}_{ood_modality}")
+                            r2_dict, data, path_to_save, f"r2_delta_pert_{ood_primary}_{ood_modality}")
 
                     elif evaluation_metric == 'rigorous_pearson_delta':
                         X = ctrl_adata.X.toarray() if issparse(ctrl_adata.X) else ctrl_adata.X
@@ -1208,7 +1296,7 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         draw_boxplot(
                             r2_dict, data, path_to_save, f"normalized_r2_{ood_primary}_{ood_modality}")
 
-                    elif evaluation_metric == 'semi_rigorous_normalized_r2_brbic':
+                    elif evaluation_metric == 'semi_rigorous_pearson_delta_pert':
                         modality_adata = ood_modality_adata[ood_modality_adata.obs[data_params['modality_variable']] == ood_modality].copy()
                         primaries_modality = modality_adata.obs[data_params['primary_variable']].unique()
                         mean_list = []
@@ -1367,10 +1455,24 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
 
                     elif evaluation_metric == 'rigorous_wasserstein':
                         metric_dict = assess.rigorous_wasserstein(true_adata, pred_dict, true_except_ood, data_params['primary_variable'])
-                        draw_boxplot(
-                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
                         with open(f'{path_to_save}/wasserstein_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
+
+                    elif evaluation_metric == 'rigorous_reg_ot_mahalanobis':
+                        max_size = 15000
+                        if ood_modality_adata.n_obs > max_size: 
+                            chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
+                            all_adata = ood_modality_adata[chosen_indices].copy()
+                        else:
+                            all_adata = ood_modality_adata.copy()
+                        metric_dict = assess.rigorous_reg_ot_mahalanobis(true_adata, pred_dict, true_except_ood, 
+                                                                         all_adata, data_params['primary_variable'])
+                        with open(f'{path_to_save}/reg_ot_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
         
                     elif evaluation_metric == 'rigorous_mmd':
                         metric_dict = assess.rigorous_mmd(true_adata, pred_dict, true_except_ood, data_params['primary_variable'])
@@ -1411,7 +1513,21 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             pickle.dump(metric_dict, f)
                         draw_boxplot(
                             metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
-
+                    
+                    elif evaluation_metric == 'rigorous_classifier_score':
+                        metric_dict = assess.rigorous_classifier_score(true_adata, pred_dict, true_except_ood, data_params['primary_variable'])
+                        with open(f'{path_to_save}/classifier_score_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
+                    
+                    elif evaluation_metric == 'rigorous_c2st_distance':
+                        metric_dict = assess.rigorous_c2st_distance(true_adata, pred_dict, true_except_ood, data_params['primary_variable'])
+                        with open(f'{path_to_save}/c2st_distance_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
+                                         
                     elif evaluation_metric == 'semi_rigorous_mmd':
                         if ood_indices_test is not None:
                             train_adata =  ood_modality_adata[(ood_modality_adata.obs[data_params['primary_variable']] == ood_primary) & 
@@ -1434,6 +1550,19 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             train_adata = None
                         metric_dict = assess.semi_rigorous_Edistance(true_adata, pred_dict, true_except_ood, data_params['primary_variable'], train_adata=train_adata)
                         with open(f'{path_to_save}/Edistance_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
+
+                    elif evaluation_metric == 'semi_rigorous_c2st_distance':
+                        if ood_indices_test is not None:
+                            train_adata =  ood_modality_adata[(ood_modality_adata.obs[data_params['primary_variable']] == ood_primary) & 
+                                                (ood_modality_adata.obs[data_params['modality_variable']] == ood_modality)].copy()
+                            train_adata = train_adata[~train_adata.obs.index.isin(ood_indices_test)].copy()
+                        else:
+                            train_adata = None
+                        metric_dict = assess.semi_rigorous_c2st_distance(true_adata, pred_dict, true_except_ood, data_params['primary_variable'], train_adata=train_adata)
+                        with open(f'{path_to_save}/c2st_distance_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(metric_dict, f)
                         draw_boxplot(
                             metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
@@ -1577,14 +1706,15 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         draw_boxplot(
                             metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
         
-                    elif evaluation_metric == "noise_effect_mixing_index":
-                        max_size = 15000
+                    elif evaluation_metric == "noise_effect_mixing_index_louvain":
+                        resolution = 2
+                        max_size = 5000
                         if ood_modality_adata.n_obs > max_size: 
                             chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
                             all_adata = ood_modality_adata[chosen_indices].copy()
                         else:
                             all_adata = ood_modality_adata.copy()
-                        mixing_index_dict = assess.noise_effect_mixing_index(true_adata, true_except_ood, all_adata=all_adata, n_repeats=5, percent_interval=2, method='random_all', mode='not_nested')
+                        mixing_index_dict = assess.noise_effect_mixing_index_louvain(true_adata, true_except_ood, all_adata=all_adata, n_repeats=5, percent_interval=2, method='random_all', mode='not_nested', resolution=resolution)
                         path_to_save_modality = os.path.join(path_to_save, ood_modality)
                         os.makedirs(path_to_save_modality, exist_ok=True)
                         with open(f'{path_to_save_modality}/mixing_noise_{ood_primary}.pkl', 'wb') as f:
@@ -1592,14 +1722,15 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         true_pos_lineplot(mixing_index_dict, ood_primary, 'mixing-index', data, path_to_save_modality, 
                                         "noise percentage", "mixing_index, noise by random-all sampling", legend_title='', y_min=0, y_max=1)
         
-                    elif evaluation_metric == "noise_effect_mixing_index_shuffle":
-                        max_size = 15000
+                    elif evaluation_metric == "noise_effect_mixing_index_louvain_shuffle":
+                        resolution = 2
+                        max_size = 5000
                         if ood_modality_adata.n_obs > max_size: 
                             chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
                             all_adata = ood_modality_adata[chosen_indices].copy()
                         else:
                             all_adata = ood_modality_adata.copy()
-                        mixing_index_dict = assess.noise_effect_mixing_index(true_adata, true_except_ood, all_adata=all_adata, n_repeats=5, percent_interval=2, method='shuffle')
+                        mixing_index_dict = assess.noise_effect_mixing_index_louvain(true_adata, true_except_ood, all_adata=all_adata, n_repeats=5, percent_interval=2, method='shuffle', resolution=resolution)
                         path_to_save_modality = os.path.join(path_to_save, ood_modality)
                         os.makedirs(path_to_save_modality, exist_ok=True)
                         with open(f'{path_to_save_modality}/mixing_noise_{ood_primary}.pkl', 'wb') as f:
@@ -1610,14 +1741,15 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                                         "noise percentage", "mixing index", title=f"{data[0].upper()+data[1:]} - {ood_primary}\nshuffling noise", 
                                         legend_title='', y_min=0, y_max=1)
 
-                    elif evaluation_metric == "noise_effect_mixing_index_shuffle_not_nested":
-                        max_size = 15000
+                    elif evaluation_metric == "noise_effect_mixing_index_louvain_shuffle_not_nested":
+                        resolution = 2
+                        max_size = 5000
                         if ood_modality_adata.n_obs > max_size: 
                             chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
                             all_adata = ood_modality_adata[chosen_indices].copy()
                         else:
                             all_adata = ood_modality_adata.copy()
-                        mixing_index_dict = assess.noise_effect_mixing_index(true_adata, true_except_ood, all_adata=all_adata, n_repeats=5, percent_interval=2, method='shuffle', mode='not_nested')
+                        mixing_index_dict = assess.noise_effect_mixing_index_louvain(true_adata, true_except_ood, all_adata=all_adata, n_repeats=5, percent_interval=2, method='shuffle', mode='not_nested', resolution=resolution)
                         path_to_save_modality = os.path.join(path_to_save, ood_modality)
                         os.makedirs(path_to_save_modality, exist_ok=True)
                         with open(f'{path_to_save_modality}/mixing_noise_{ood_primary}.pkl', 'wb') as f:
@@ -1784,6 +1916,30 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                                         "noise percentage", "Wasserstein distance",
                                         title=f"Wasserstein vs shuffling noise, not nested\n{data[0].upper()+data[1:]} - {ood_primary}", legend_title='')
         
+                    elif evaluation_metric == "noise_effect_c2st_distance_shuffle":
+                        metric_dict = assess.noise_effect_c2st_distance(true_adata, true_except_ood, n_repeats=5, percent_interval=2, method='shuffle')
+                        path_to_save_modality = os.path.join(path_to_save, ood_modality)
+                        os.makedirs(path_to_save_modality, exist_ok=True)
+                        with open(f'{path_to_save_modality}/c2st_{ood_primary}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        # with open(f'{path_to_save_modality}/c2st_{ood_primary}.pkl', 'rb') as f:
+                        #     metric_dict = pickle.load(f)
+                        true_pos_lineplot(metric_dict, ood_primary, 'c2st', data, path_to_save_modality, 
+                                        "noise percentage", "C2ST", 
+                                        title=f"{data[0].upper()+data[1:]} - {ood_primary}\nshuffling noise", legend_title='')    
+
+                    elif evaluation_metric == "noise_effect_c2st_distance_shuffle_not_nested":
+                        metric_dict = assess.noise_effect_c2st_distance(true_adata, true_except_ood, n_repeats=5, percent_interval=2, method='shuffle', mode='not_nested')
+                        path_to_save_modality = os.path.join(path_to_save, ood_modality)
+                        os.makedirs(path_to_save_modality, exist_ok=True) 
+                        with open(f'{path_to_save_modality}/c2st_{ood_primary}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        # with open(f'{path_to_save_modality}/c2st_{ood_primary}.pkl', 'rb') as f:
+                        #     metric_dict = pickle.load(f)
+                        true_pos_lineplot(metric_dict, ood_primary, 'c2st', data, path_to_save_modality, 
+                                        "noise percentage", "C2ST", 
+                                        title=f"{data[0].upper()+data[1:]} - {ood_primary}\nshuffling noise", legend_title='')    
+
                     elif evaluation_metric == "noise_effect_spearman":
                         correlation_dict = assess.noise_effect_spearman(true_adata, true_except_ood, n_repeats=10, percent_interval=1, method='random_all', mode='not_nested')
                         path_to_save_modality = os.path.join(path_to_save, ood_modality)
@@ -1817,7 +1973,41 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             pickle.dump(metric_dict, f)
                         true_pos_lineplot(metric_dict, ood_primary, 'wasserstein distance', data, path_to_save_modality, 
                                         "noise percentage", "wasserstein, noise by random-all sampling", legend_title='')
+
+                    elif evaluation_metric == "noise_effect_reg_ot_mahalanobis":
+                        max_size = 15000
+                        if ood_modality_adata.n_obs > max_size: 
+                            chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
+                            all_adata = ood_modality_adata[chosen_indices].copy()
+                        else:
+                            all_adata = ood_modality_adata.copy()
+                        metric_dict = assess.noise_effect_reg_ot_mahalanobis(true_adata, true_except_ood, all_adata, n_repeats=5, 
+                                                                             percent_interval=2, method='random_all', mode='not_nested')
+                        path_to_save_modality = os.path.join(path_to_save, ood_modality)
+                        os.makedirs(path_to_save_modality, exist_ok=True)
+                        with open(f'{path_to_save_modality}/reg_ot_{ood_primary}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        true_pos_lineplot(metric_dict, ood_primary, 'regularized-ot', data, path_to_save_modality, 
+                                        "noise percentage", "regularized OT, noise by random-all sampling", legend_title='')
         
+                    elif evaluation_metric == "noise_effect_reg_ot_mahalanobis_shuffle":
+                        max_size = 15000
+                        if ood_modality_adata.n_obs > max_size: 
+                            chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
+                            all_adata = ood_modality_adata[chosen_indices].copy()
+                        else:
+                            all_adata = ood_modality_adata.copy()
+                        metric_dict = assess.noise_effect_reg_ot_mahalanobis(true_adata, true_except_ood, all_adata, n_repeats=5, 
+                                                                             percent_interval=2, method='shuffle')
+                        path_to_save_modality = os.path.join(path_to_save, ood_modality)
+                        os.makedirs(path_to_save_modality, exist_ok=True)
+                        with open(f'{path_to_save_modality}/reg_ot_{ood_primary}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        true_pos_lineplot(metric_dict, ood_primary, 'regularized-ot', data, path_to_save_modality, 
+                                        "noise percentage", "regularized OT",
+                                        title=f"{data[0].upper()+data[1:]} - {ood_primary}\nshuffling noise", legend_title='')
+                                        
+
                     elif evaluation_metric == "noise_effect_mmd":
                         metric_dict = assess.noise_effect_mmd(true_adata, true_except_ood, n_repeats=5, percent_interval=2, method='random_all', mode='not_nested')
                         path_to_save_modality = os.path.join(path_to_save, ood_modality)
@@ -1835,6 +2025,15 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             pickle.dump(metric_dict, f)
                         true_pos_lineplot(metric_dict, ood_primary, 'E distance', data, path_to_save_modality, 
                                         "noise percentage", "E distance", legend_title='')
+
+                    elif evaluation_metric == "noise_effect_c2st_distance":
+                        metric_dict = assess.noise_effect_c2st_distance(true_adata, true_except_ood, n_repeats=5, percent_interval=2, method='random_all', mode='not_nested')
+                        path_to_save_modality = os.path.join(path_to_save, ood_modality)
+                        os.makedirs(path_to_save_modality, exist_ok=True)
+                        with open(f'{path_to_save_modality}/c2st_{ood_primary}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        true_pos_lineplot(metric_dict, ood_primary, 'c2st', data, path_to_save_modality, 
+                                        "noise percentage", "C2ST", legend_title='')
         
                     elif evaluation_metric == 'noise_effect_f1':
                         f1_down_dict, f1_up_dict, precision_down_dict, precision_up_dict, recall_down_dict, recall_up_dict = \
@@ -2045,6 +2244,32 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             [non_trivial_dict, trivial_dict, non_significant_dict], data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}",\
                                 subtitles)
 
+                    elif evaluation_metric == 'rigorous_subset_c2st_distance':
+                        if true_logfc_df is None:
+                                true_logfc_df = seurat_deg(
+                                    ctrl_true_adata, data_params['modality_variable'], ood_modality, data_params['control_key'], test_use='MAST', find_variable_features=True)
+                                true_logfc_df = true_logfc_df.sort_values(by="p_val_adj", ascending=True)
+                        true_copy = true_adata.copy()
+                        if issparse(true_copy.X):
+                            true_copy.X = true_copy.X.toarray()
+                        ctrl_copy = ctrl_adata.copy()
+                        if issparse(ctrl_copy.X):
+                            ctrl_copy.X = ctrl_copy.X.toarray()
+                        non_trivial_dict, trivial_dict, non_significant_dict, num_genes_list = \
+                            assess.rigorous_subset_c2st_distance(true_copy, ctrl_copy, pred_dict, true_except_ood, data_params['primary_variable'], true_logfc_df)
+                        with open(f'{path_to_save}/trivial_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(trivial_dict, f)
+                        with open(f'{path_to_save}/non_trivial_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(non_trivial_dict, f)
+                        with open(f'{path_to_save}/non_significant_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(non_significant_dict, f)
+                        with open(f'{path_to_save}/num_genes_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump({'non_trivial':num_genes_list[0], 'trivial':num_genes_list[1], 'non_significant':num_genes_list[2]}, f)
+                        subtitles = [f"{num_genes_list[0]} non-trivial genes", f"{num_genes_list[1]} trivial-genes", f"{num_genes_list[2]} non-significant genes (significance threshold: 0.05)"]
+                        plots.draw_boxplot_multiple(
+                            [non_trivial_dict, trivial_dict, non_significant_dict], data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}",\
+                                subtitles)
+
                     elif evaluation_metric == 'rigorous_subset_knn_loss':
                         if true_logfc_df is None:
                                 true_logfc_df = seurat_deg(
@@ -2126,12 +2351,13 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             [non_trivial_dict, trivial_dict, non_significant_dict], data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}",\
                                 [f"{num_genes_list[0]} non-trivial genes", f"{num_genes_list[1]} trivial-genes", f"{num_genes_list[2]} non-significant genes (significance threshold: 0.05)"])
 
-                    elif evaluation_metric == 'rigorous_subset_mixing_index_seurat':
+                    elif evaluation_metric == 'rigorous_subset_mixing_index_louvain':
+                        resolution = 2
                         if true_logfc_df is None:
                                 true_logfc_df = seurat_deg(
                                     ctrl_true_adata, data_params['modality_variable'], ood_modality, data_params['control_key'], test_use='MAST', find_variable_features=True)
                                 true_logfc_df = true_logfc_df.sort_values(by="p_val_adj", ascending=True)
-                        max_size = 15000
+                        max_size = 5000
                         if ood_modality_adata.n_obs > max_size: 
                             chosen_indices = np.random.choice(ood_modality_adata.n_obs, size=max_size, replace=False)
                             all_adata = ood_modality_adata[chosen_indices].copy()
@@ -2144,7 +2370,7 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                         if issparse(ctrl_copy.X):
                             ctrl_copy.X = ctrl_copy.X.toarray()
                         non_trivial_dict, trivial_dict, non_significant_dict, num_genes_list = \
-                            assess.rigorous_subset_mixing_index_seurat(true_copy, ctrl_copy, pred_dict, true_except_ood, data_params, ood_primary, ood_modality, true_logfc_df, all_adata=all_adata)
+                            assess.rigorous_subset_mixing_index_louvain(true_copy, ctrl_copy, pred_dict, true_except_ood, data_params, true_logfc_df, all_adata=all_adata, resolution=resolution)
                         with open(f'{path_to_save}/non_trivial_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
                             pickle.dump(non_trivial_dict, f)
                         with open(f'{path_to_save}/trivial_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
@@ -2188,7 +2414,34 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                             plots.draw_boxplot_multiple(
                                 [non_trivial_dict[i], trivial_dict[i]], data, f"{path_to_save}/{folders[i]}", f"{modes[i]}_{ood_primary}_{ood_modality}",\
                                     subtitles, title=f"{folders[i]}")
+
+                    elif evaluation_metric == 'rigorous_transposed_rank_euclidean':
+                        true_except_ood = modality_adata[(modality_adata.obs[data_params['primary_variable']] != ood_primary)].copy()
+                        metric_dict = assess.rigorous_transposed_rank(true_adata, pred_dict, true_except_ood, 
+                                            data_params['primary_variable'], ood_primary, metric='euclidean')
+                        with open(f'{path_to_save}/euclidean_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
                         
+                    elif evaluation_metric == 'rigorous_transposed_rank_Edistance':
+                        true_except_ood = modality_adata[(modality_adata.obs[data_params['primary_variable']] != ood_primary)].copy()
+                        metric_dict = assess.rigorous_transposed_rank(true_adata, pred_dict, true_except_ood, 
+                                            data_params['primary_variable'], ood_primary, metric='Edistance')
+                        with open(f'{path_to_save}/Edistance_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
+                        
+                    elif evaluation_metric == 'rigorous_transposed_rank_c2st':
+                        true_except_ood = modality_adata[(modality_adata.obs[data_params['primary_variable']] != ood_primary)].copy()
+                        metric_dict = assess.rigorous_transposed_rank(true_adata, pred_dict, true_except_ood, 
+                                            data_params['primary_variable'], ood_primary, metric='c2st', n_splits=2)
+                        with open(f'{path_to_save}/c2st_dict_{ood_primary}_{ood_modality}.pkl', 'wb') as f:
+                            pickle.dump(metric_dict, f)
+                        draw_boxplot(
+                            metric_dict, data, path_to_save, f"{evaluation_metric}_{ood_primary}_{ood_modality}")
+                                         
 
                 if evaluation_metric == 'spearman_corr':  
                     correlation_barplot(all_corr, models, data_params["ood_primaries"], data, path_to_save, 'cell types', 'spearman correlation')  
@@ -2199,11 +2452,11 @@ def evaluate(models, datasets, data_config_path, base_path, setting, evaluation_
                 elif evaluation_metric == 'logfc_correlation':
                     correlation_barplot(logfc_corr, models, data_params["ood_primaries"], data, path_to_save, 'cell types', 'logFC correlation') 
         
-                elif evaluation_metric.startswith('mixing_index_seurat'):
-                    print(mixing_seurat)
-                    correlation_barplot(mixing_seurat, models, data_params["ood_primaries"], \
+                elif evaluation_metric.startswith('mixing_index_louvain'):
+                    print(mixing_louvain)
+                    correlation_barplot(mixing_louvain, models, data_params["ood_primaries"], \
                         data, path_to_save, 'cell types', f'{evaluation_metric}', log_scale=False)
-                    correlation_barplot(mixing_seurat, models, data_params["ood_primaries"], \
+                    correlation_barplot(mixing_louvain, models, data_params["ood_primaries"], \
                         f"{data}_log", path_to_save, 'cell types', f'{evaluation_metric}', log_scale=True)
         
                 elif evaluation_metric.startswith('spearman_corr_per_gene'):

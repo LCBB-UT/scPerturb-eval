@@ -1,17 +1,17 @@
 #!/bin/bash
 
-dataset="datlinger"
+dataset="kang"
 
-for pid_percent in 1 10 20 30 40 50
+for i in {1..5}
 do
-  pid_ratio=$(printf "%.2f" "$(echo "$pid_percent / 100" | bc -l)")
 
-  for i in {1..5}
+  for pid_percent in 1 10 20 30 40 50
   do
+    pid_ratio=$(printf "%.2f" "$(echo "$pid_percent / 100" | bc -l)")
     echo "Running $dataset with pid_percent=$pid_percent (pid_ratio=$pid_ratio), run $i"
 
     python prediction.py \
-      --models cae cpa \
+      --models scPRAM \
       --datasets ${dataset} \
       --config_path ./configs \
       --setting pid \
